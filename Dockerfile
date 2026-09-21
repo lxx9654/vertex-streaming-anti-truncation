@@ -20,9 +20,11 @@ COPY bin/ ./bin/
 COPY src/ ./src/
 COPY public/ ./public/
 COPY scripts/ ./scripts/
+COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 
 # 持久化目录：settings.json（GUI 保存的模型/凭据）放这里
-RUN mkdir -p /data/state && chown -R node:node /data /app
+RUN chmod +x /app/docker-entrypoint.sh \
+ && mkdir -p /data/state && chown -R node:node /data /app
 USER node
 
 EXPOSE 4781 4780
@@ -30,5 +32,6 @@ EXPOSE 4781 4780
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||4781)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
 # 带 GUI 启动：控制台会读取已保存配置并自动拉起网关；首次用它配置模型
 CMD ["npm", "start"]

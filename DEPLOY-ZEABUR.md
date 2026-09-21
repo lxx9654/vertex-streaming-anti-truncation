@@ -25,7 +25,58 @@
 {"event":"listening","host":"0.0.0.0","endpoint":"http://0.0.0.0:4781/v1",...}
 ```
 
-## 二、环境变量（照抄，只改标注的两项）
+## 二、服务账号模式：一屏抄完的环境变量（推荐方案）
+
+```
+HOST=0.0.0.0
+GUI_HOST=0.0.0.0
+PORT=4781
+GUI_PORT=4780
+GATEWAY_STATE_DIR=/data/state
+UPSTREAM_TIMEOUT_MS=600000
+ANTI_TRUNCATION=true
+VERTEX_SERVICE_TIER=standard
+VERTEX_LOCATION=global
+VERTEX_PROJECT_ID=你的GCP项目ID
+GOOGLE_APPLICATION_CREDENTIALS=/data/keys/sa.json
+GATEWAY_API_KEY=18b3a4017dc4edf49023e307fd687b5f9e6bf1e368bebfdeff0ce74365388875
+```
+
+### 服务账号 JSON 怎么进容器（两种方式，选一个）
+
+**方式 1：base64 塞进环境变量（推荐，不用传文件）**
+
+在你电脑上用 PowerShell 把 JSON 转成一行 base64（自动进剪贴板）：
+
+```powershell
+$b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes("C:\你的路径\service-account.json"))
+Set-Clipboard $b64
+```
+
+然后在 Zeabur 加一条环境变量：
+
+```
+VERTEX_SERVICE_ACCOUNT_B64=<粘贴那一长串>
+```
+
+容器启动时 `docker-entrypoint.sh` 会自动解码写到 `/data/keys/sa.json`（权限 600），并把该变量从进程环境里抹掉。
+
+> 卷还在的话文件会留下，之后即使删掉这个环境变量也能跑；换 JSON 时重新部署即可覆盖。
+
+**方式 2：直接传文件到持久卷**
+
+```bash
+scp -P <端口> C:/你的路径/service-account.json root@<VPS>:/tmp/sa.json
+# 再 SSH 进 VPS，找到卷对应的 PVC 目录后：
+mkdir -p <卷路径>/keys && mv /tmp/sa.json <卷路径>/keys/sa.json && chmod 600 <卷路径>/keys/sa.json
+```
+
+卷路径一般在 `/var/lib/rancher/k3s/storage/pvc-*<服务名>*`，可用
+`find /var/lib/rancher/k3s/storage -maxdepth 2 -iname "*vertex*"` 找。
+
+---
+
+## 二·补、环境变量（通用说明，含其他鉴权方式）
 
 ```
 HOST=0.0.0.0
