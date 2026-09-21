@@ -100,7 +100,10 @@ export async function createConsole({ store = createSettingsStore(), fetchImpl =
       if (!allowedHosts.has(hostHeader)) throw new SettingsError("Invalid local host", 403);
       const origin = req.headers.origin;
       const selfOrigins = new Set(["http://" + hostHeader, "https://" + hostHeader]);
-      if ((origin && !selfOrigins.has(origin)) || req.headers["sec-fetch-site"] === "cross-site") throw new SettingsError("Cross-origin access denied", 403);
+      const method = (req.method || "GET").toUpperCase();
+      // Cross-site top-level navigations (address bar, external links) carry no
+      // Origin and are read-only; only reject cross-site non-GET requests.
+      if ((origin && !selfOrigins.has(origin)) || (req.headers["sec-fetch-site"] === "cross-site" && method !== "GET" && method !== "HEAD")) throw new SettingsError("Cross-origin access denied", 403);
       const path = new URL(req.url, "http://localhost").pathname;
       if (req.method === "GET" && assets.has(path)) {
         const [file, type] = assets.get(path);
