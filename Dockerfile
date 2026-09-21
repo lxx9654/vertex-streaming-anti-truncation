@@ -6,6 +6,7 @@ ENV NODE_ENV=production \
     HOST=0.0.0.0 \
     GUI_HOST=0.0.0.0 \
     PORT=4781 \
+    GATEWAY_PORT=4781 \
     GUI_PORT=4780 \
     GATEWAY_STATE_DIR=/data/state \
     UPSTREAM_TIMEOUT_MS=600000

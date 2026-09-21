@@ -25,13 +25,18 @@ export async function settingsFromEnv(env = process.env) {
     try { serviceAccountJson = (await readFile(file, "utf8")).replace(/^\uFEFF/, ""); }
     catch { throw new Error("Unable to read the Google service-account file"); }
   }
+  // Platforms like Zeabur inject PORT as a comma-separated list of exposed
+  // ports (e.g. "4780,4781"), which would fail integer parsing. Prefer the
+  // dedicated GATEWAY_PORT, then the first value of PORT.
+  const rawPort = env.GATEWAY_PORT ?? env.PORT;
+  const firstPort = rawPort == null ? rawPort : String(rawPort).split(",")[0].trim();
   return {
     ...DEFAULT_SETTINGS, projectId: env.VERTEX_PROJECT_ID || "", location: env.VERTEX_LOCATION || "global",
     gatewayKey: env.GATEWAY_API_KEY || "", serviceAccountJson,
     accessToken: env.VERTEX_ACCESS_TOKEN || "", apiKey: env.VERTEX_API_KEY || "",
     authMode: env.VERTEX_API_KEY ? "express" : env.VERTEX_ACCESS_TOKEN ? "access-token" : "service-account",
     serviceTier: env.VERTEX_SERVICE_TIER || "standard",
-    port: integer(env.PORT, 4781, 1, 65535, "PORT"),
+    port: integer(firstPort, 4781, 1, 65535, "PORT"),
     timeoutMs: integer(env.UPSTREAM_TIMEOUT_MS, 600000, 1000, 1800000, "UPSTREAM_TIMEOUT_MS"),
     antiTruncation: env.ANTI_TRUNCATION !== "false",
   };
