@@ -6,9 +6,11 @@ try {
   const config = await loadConfig();
   const logger = event => process.stdout.write(JSON.stringify(event) + "\n");
   const server = createGatewayServer(config, { logger });
-  server.on("error", () => { console.error("Gateway could not bind its loopback port"); process.exitCode = 1; });
-  server.listen(config.port, "127.0.0.1", () => {
-    logger({ event: "listening", endpoint: `http://127.0.0.1:${config.port}/v1`, model: config.model });
+  // Container builds set HOST=0.0.0.0 so the gateway is reachable from outside the container.
+  const host = process.env.HOST || "127.0.0.1";
+  server.on("error", () => { console.error("Gateway could not bind its port"); process.exitCode = 1; });
+  server.listen(config.port, host, () => {
+    logger({ event: "listening", host, endpoint: `http://${host}:${config.port}/v1`, model: config.model });
   });
   let stopping = false;
   for (const name of ["SIGINT", "SIGTERM"]) process.on(name, () => {

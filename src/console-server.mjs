@@ -18,7 +18,8 @@ async function readJson(req) {
   try { return JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { throw new SettingsError("Invalid JSON"); }
 }
 async function listen(server, port) {
-  server.listen(port, "127.0.0.1");
+  // Container builds set GUI_HOST=0.0.0.0 so the console is reachable from outside the container.
+  server.listen(port, process.env.GUI_HOST || "127.0.0.1");
   try { await once(server, "listening"); }
   catch { throw new SettingsError("Port is unavailable; the running service has not been changed", 409); }
 }

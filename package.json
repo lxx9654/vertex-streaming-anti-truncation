@@ -16,7 +16,7 @@
   "scripts": {
     "start": "node --env-file-if-exists=.env bin/gui.mjs",
     "gui": "node --env-file-if-exists=.env bin/gui.mjs",
-    "gateway": "node --env-file=.env bin/start.mjs",
+    "gateway": "node --env-file-if-exists=.env bin/start.mjs",
     "check": "node scripts/check.mjs",
     "test": "node --test",
     "verify": "npm run check && npm test",
