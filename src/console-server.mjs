@@ -89,9 +89,18 @@ export async function createConsole({ store = createSettingsStore(), fetchImpl =
     res.setHeader("content-security-policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
     try {
       const port = server.address()?.port;
-      if (!["127.0.0.1:" + port, "localhost:" + port].includes(req.headers.host)) throw new SettingsError("Invalid local host", 403);
+      // Loopback by default; extra hosts (e.g. a reverse-proxied public domain)
+      // can be allowed via CONSOLE_ALLOWED_HOSTS (comma-separated).
+      const hostHeader = String(req.headers.host || "");
+      const allowedHosts = new Set(["127.0.0.1:" + port, "localhost:" + port]);
+      for (const raw of (process.env.CONSOLE_ALLOWED_HOSTS || "").split(",")) {
+        const h = raw.trim(); if (!h) continue;
+        allowedHosts.add(h); allowedHosts.add(h + ":" + port); allowedHosts.add(h + ":443");
+      }
+      if (!allowedHosts.has(hostHeader)) throw new SettingsError("Invalid local host", 403);
       const origin = req.headers.origin;
-      if ((origin && origin !== "http://" + req.headers.host) || req.headers["sec-fetch-site"] === "cross-site") throw new SettingsError("Cross-origin access denied", 403);
+      const selfOrigins = new Set(["http://" + hostHeader, "https://" + hostHeader]);
+      if ((origin && !selfOrigins.has(origin)) || req.headers["sec-fetch-site"] === "cross-site") throw new SettingsError("Cross-origin access denied", 403);
       const path = new URL(req.url, "http://localhost").pathname;
       if (req.method === "GET" && assets.has(path)) {
         const [file, type] = assets.get(path);
