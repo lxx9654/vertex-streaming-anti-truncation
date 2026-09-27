@@ -1,5 +1,9 @@
 # Vertex Streaming Anti-Truncation
 
+A paired SillyTavern UI extension and server plugin can also add the transport selector directly to the existing Google Vertex AI connection panel. It reuses Tavern credentials and runs inside the Tavern process. Disabled by default; see the [installation and validation guide (Chinese)](docs/SILLYTAVERN.md).
+
+In Tavern's **Install extension** dialog, paste `https://github.com/ken050210/vertex-streaming-anti-truncation` and leave the branch blank. **The server companion is also required:** run `node plugins.js install https://github.com/ken050210/vertex-streaming-anti-truncation` from the SillyTavern root, enable `enableServerPlugins`, then restart Tavern. Installing the UI alone is insufficient. Do not install a second copy over an existing manual installation; follow the migration notes in the guide.
+
 [中文](README.md) | English
 
 A local gateway for Vertex AI / Gemini with a model library and optional text-tool transport. Save normal, buffered anti-truncation and streaming anti-truncation aliases for each upstream model, then select them from SillyTavern's custom OpenAI connection.
@@ -163,7 +167,7 @@ Requests to the following upstream models drop fields that Google documents as u
 
 Sources are the official pages updated 2026-09-24 and checked 2026-09-25. Model IDs with an `@version` suffix use their base model; unlisted models are unchanged. Temperature/top_p stay where a model page still lists ranges, for example 3.5 Flash.
 
-`UPSTREAM_TIMEOUT_MS` (default 600000) now also bounds waiting for response headers and between body chunks. Node's built-in fetch previously stopped after 300 s with `Headers Timeout Error` regardless of this setting.
+`UPSTREAM_TIMEOUT_MS` (default 600000) now also bounds waiting for response headers and between body chunks. Node's built-in fetch previously stopped after 300 s with `Headers Timeout Error` regardless of this setting. It is also the total limit for one request, counted from when the gateway receives it: generation still in progress is stopped, a stream that has already started is cut off, and the log records `504 upstream_timeout`. For very long replies or Flex, raise the upstream timeout in the console (up to 1800 s).
 
 ## Scope and limits
 
