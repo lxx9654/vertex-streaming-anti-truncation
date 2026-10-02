@@ -84,6 +84,8 @@ The console includes light/dark themes, responsive layout, overview, connection 
 
 Settings are stored as plaintext in `~/.vertex-streaming-anti-truncation/settings.json`, outside the repository. Keep this directory private. Override it with `GATEWAY_STATE_DIR`; change the console port with `GUI_PORT` (default `4780`). The API port defaults to `4781`. Saves use revision checks and atomic replacement. Restarting the console loads saved settings and starts the gateway. Saved GUI settings take precedence over `.env`; an existing `.env` can initialize an unsaved setup. Secrets are never stored in browser storage or returned by configuration APIs.
 
+If the process exits while recovering an expired configuration lock, a `settings.lock.recovery` marker may remain in the state directory and keep saves reporting another editor. Stop all console and configuration-writing processes, back up `settings.json`, then verify the filename and remove only `settings.lock.recovery` before restarting. Preserve the configuration file and the rest of the state directory.
+
 ### Model library and variants
 
 Enter credentials under **连接配置**, then open **模型与版本** and click **拉取 Model List**. Discovery uses the current connection form plus saved credentials, without starting inference or saving the draft. Search and select multiple models, check the variants to add, then click **保存全部配置** to save both connection and model drafts. Refresh the model list in your client afterwards.
@@ -221,3 +223,11 @@ npm run smoke -- --live
 The smoke command uses saved GUI settings, falling back to environment variables when no file exists. Add `--env` to explicitly target a CLI-only service configured through `.env`. It selects the first streaming anti-truncation profile by default; use `--model your-alias` to select another. The GUI test page supports normal and buffered profiles too.
 
 The default tests use local fixtures, require no real credentials and incur no inference charges. The live smoke test measures content-bearing reads and their time span, then matches response request IDs to the logs. See [docs/VALIDATION.en.md](docs/VALIDATION.en.md) for the validation scope.
+
+## Unicode input
+
+The gateway's **Unicode input (all models)** setting is a separate, default-off global toggle (`UNICODE_INPUT=true|false`). Save/apply affects subsequent requests across normal, buffered and streaming modes. Enabled clients must supply `router_unicode_input: {user_floor: "latest actual user chat floor"}`. Missing source fails locally with 400; an expanded body exceeding the size limit fails with 413. The local field is stripped even when disabled.
+
+Only matching message text is encoded; unmatched input remains unchanged. There is no serialized-JSON fallback: model IDs, tool names, schemas and media URLs remain intact. Tools/schema bypass does not disable input encoding. Response header `x-unicode-input` and fixed metadata/counts describe the result without logging prompt text.
+
+For SillyTavern custom API connections, import and enable `integrations/sillytavern-unicode-floor.json` (default endpoint loopback port 4781; adjust `gatewayPort` in the script if needed). For native Vertex connections, use the paired extension's separate Unicode checkbox instead. Disable duplicate preset encoders. Encoding can increase tokens/latency and does not guarantee model comprehension. Paired Tavern installation, toggle persistence and short live requests across all three transport modes passed; long-context quality and truncation reduction remain untested. See the [acceptance record](docs/UNICODE-INPUT-AUDIT.md).

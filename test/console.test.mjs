@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, readFile, writeFile, utimes, access } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, readFile, writeFile, utimes, access } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import http from "node:http";
@@ -121,6 +121,48 @@ test("a lock left by an interrupted save expires after a minute; a recent lock s
   await assert.rejects(access(lock), { code: "ENOENT" });
 });
 
+test("competing stale-lock recoveries commit exactly the acknowledged revision", async t => {
+  const root = await mkdtemp(join(tmpdir(), "vertex-console-lock-race-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  // Independent stores exercise filesystem coordination, including contenders
+  // that observed the old lock before another writer created a replacement.
+  for (let round = 0; round < 30; round++) {
+    const directory = join(root, String(round));
+    await mkdir(directory);
+    const store = createSettingsStore({ directory, env: {} });
+    const settings = { ...(await store.load()).settings, authMode: "express", apiKey: "synthetic-express-credential", gatewayKey: "synthetic-local-console-key" };
+    const lock = join(directory, "settings.lock");
+    await writeFile(lock, "");
+    const expired = new Date(Date.now() - 120000);
+    await utimes(lock, expired, expired);
+    const results = await Promise.allSettled(Array.from({ length: 16 }, (_, index) =>
+      createSettingsStore({ directory, env: {} }).save({ ...settings, timeoutMs: 100000 + index }, "new")));
+    const committed = results.filter(result => result.status === "fulfilled");
+    assert.equal(committed.length, 1, `round ${round} must acknowledge only one writer`);
+    const persisted = await store.load();
+    assert.equal(persisted.revision, committed[0].value.revision);
+    assert.equal(persisted.settings.timeoutMs, committed[0].value.settings.timeoutMs);
+    for (const result of results.filter(result => result.status === "rejected")) assert.equal(result.reason.status, 409);
+    await assert.rejects(access(lock), { code: "ENOENT" });
+    await assert.rejects(access(lock + ".recovery"), { code: "ENOENT" });
+  }
+});
+
+test("an interrupted recovery marker cannot be stolen by another stale-lock recovery", async t => {
+  const directory = await mkdtemp(join(tmpdir(), "vertex-console-lock-recovery-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const store = createSettingsStore({ directory, env: {} });
+  const settings = { ...(await store.load()).settings, authMode: "express", apiKey: "synthetic-express-credential", gatewayKey: "synthetic-local-console-key" };
+  const lock = join(directory, "settings.lock"), marker = lock + ".recovery";
+  await writeFile(lock, "original lock"); await writeFile(marker, "recovery in progress");
+  const expired = new Date(Date.now() - 120000);
+  await utimes(lock, expired, expired); await utimes(marker, expired, expired);
+  await assert.rejects(store.save(settings, "new"), { status: 409 });
+  assert.equal(await readFile(lock, "utf8"), "original lock");
+  assert.equal(await readFile(marker, "utf8"), "recovery in progress");
+  assert.equal((await store.load()).saved, false);
+});
+
 test("port changes release the original listener and hot applies affect the replacement listener", async t => {
   const f = await fixture(t);
   let result = await (await f.api("/api/config", { revision: "new", settings: f.settings })).json();
@@ -214,4 +256,25 @@ test("console probes the selected saved profile and rejects unknown aliases befo
   assert.equal(response.status, 200); assert.match(wire, /Selected model/); assert.match(wire, /buffered-second/);
   assert.equal(calls.length, 1); assert.match(calls[0].url, /gemini-fixture-b:generateContent$/);
   assert.equal(calls[0].body.generationConfig.maxOutputTokens, 512);
+});
+
+test("Unicode save/apply persists and affects new requests independently of transport", async t => {
+  const f = await fixture(t);
+  let result = await (await f.api("/api/config", { revision: "new", settings: { ...f.settings, unicodeInput: true } })).json();
+  assert.equal(result.settings.unicodeInput, true);
+  assert.equal(f.app.status().active.unicodeInput, true);
+  assert.equal((await f.store.load()).settings.unicodeInput, true);
+  const before = f.requests.length;
+  const response = await fetch(`http://127.0.0.1:${f.settings.port}/v1/chat/completions`, {
+    method: "POST", headers: { authorization: "Bearer " + f.settings.gatewayKey, "content-type": "application/json" },
+    body: JSON.stringify({ model: result.settings.models[0].id, messages: [{ role: "user", content: "missing floor" }] }),
+  });
+  assert.equal(response.status, 400);
+  assert.equal((await response.json()).error.code, "unicode_floor_required");
+  assert.equal(f.requests.length, before);
+  result = await (await f.api("/api/config", { revision: result.revision, settings: { unicodeInput: false } })).json();
+  assert.equal(f.app.status().active.unicodeInput, false);
+  assert.equal((await f.store.load()).settings.unicodeInput, false);
+  await f.api("/api/stop", {}); await f.api("/api/start", {});
+  assert.equal(f.app.status().active.unicodeInput, false);
 });

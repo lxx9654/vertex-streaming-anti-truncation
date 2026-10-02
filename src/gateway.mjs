@@ -1,3 +1,4 @@
+import { prepareUnicodeInput, unicodeInputLogFields } from "./unicode-input.mjs";
 import { guardCompletionStream, inspectCompletion, integrityLogFields } from "./completion-integrity.mjs";
 import { assertStructuredOutput, structuredOutputExpectation } from "./vertex-schema.mjs";
 import http from "node:http";
@@ -12,6 +13,7 @@ import { completionStream, aliasStream } from "./completion-stream.mjs";
 import { convertGeminiPrefill, fetchWithGeminiRecovery, compatibilityLogFields } from "./gemini-compat.mjs";
 import { documentedUnsupported, dropParams } from "./unsupported-params.mjs";
 import { trafficType } from "./wire.mjs";
+import { waitWithSignal } from "./abort.mjs";
 
 class Problem extends Error {
   constructor(status, code) { super(code); this.status = status; this.code = code; }
@@ -26,16 +28,34 @@ function send(response, status, body) {
   response.writeHead(status, { "content-type": "application/json; charset=utf-8" });
   response.end(JSON.stringify(body));
 }
-async function readRequest(request, limit) {
-  const chunks = [];
-  let total = 0;
-  for await (const chunk of request) {
-    total += chunk.length;
-    if (total <= limit) chunks.push(chunk);
-  }
-  if (total > limit) throw new Problem(413, "request_too_large");
-  try { return JSON.parse(Buffer.concat(chunks).toString("utf8")); }
-  catch { throw new Problem(400, "invalid_json"); }
+function readRequest(request, limit, signal) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let total = 0;
+    const cleanup = () => {
+      request.off("data", data);
+      request.off("end", end);
+      request.off("error", fail);
+      signal.removeEventListener("abort", abort);
+    };
+    const fail = error => { cleanup(); request.pause(); reject(error); };
+    const abort = () => fail(signal.reason);
+    const data = chunk => {
+      total += chunk.length;
+      if (total > limit) fail(new Problem(413, "request_too_large"));
+      else chunks.push(chunk);
+    };
+    const end = () => {
+      cleanup();
+      try { resolve(JSON.parse(Buffer.concat(chunks).toString("utf8"))); }
+      catch { reject(new Problem(400, "invalid_json")); }
+    };
+    if (signal.aborted) { abort(); return; }
+    request.on("data", data);
+    request.once("end", end);
+    request.once("error", fail);
+    signal.addEventListener("abort", abort, { once: true });
+  });
 }
 async function readCompletion(response, limit, native = false, model) {
   const chunks = [];
@@ -123,14 +143,23 @@ export function createGatewayServer(configSource, { fetchImpl = fetch, logger = 
     const onClose = () => { if (!response.writableEnded) client.abort(); };
     response.once("close", onClose);
     request.once("aborted", onClose);
+    let unicode = null;
     let stream = false, audit = null, integrity = null, status = 500, code = null, route, droppedParams = [];
     const compatibility = { prefillConverted: false, promptRetried: false };
     try {
-      let payload = await readRequest(request, config.bodyLimitBytes);
+      let payload = await readRequest(request, config.bodyLimitBytes, signal);
       validate(payload);
       route = models.find(model => model.id === payload.model);
       if (!route) throw new Problem(400, "unsupported_model");
       if (route.enabled === false) throw new Problem(503, "model_disabled");
+      try {
+        const prepared = prepareUnicodeInput(payload, config.unicodeInput === true, config.bodyLimitBytes);
+        payload = prepared.payload; unicode = prepared.metadata;
+      } catch (error) {
+        if (["unicode_floor_required", "unicode_input_too_large"].includes(error.code)) throw new Problem(error.status, error.code);
+        throw error;
+      }
+      response.setHeader("x-unicode-input", unicode?.reason || "disabled");
       stream = payload.stream === true;
       const prefill = convertGeminiPrefill(payload, route.upstreamModel, config.geminiPrefillToUser !== false);
       payload = prefill.payload; compatibility.prefillConverted = prefill.converted;
@@ -163,8 +192,9 @@ export function createGatewayServer(configSource, { fetchImpl = fetch, logger = 
       // Preserve local field/schema rejection before authentication.
       const upstreamPayload = { ...transport.payload, stream: upstreamStream };
       const firstBody = requestBody(upstreamPayload);
-      const credential = await config.accessToken();
-      const dispatcher = await upstreamDispatcher(config.timeoutMs);
+      const credential = await waitWithSignal(() => config.accessToken(), signal);
+      const dispatcher = await waitWithSignal(() => upstreamDispatcher(config.timeoutMs), signal);
+      signal.throwIfAborted();
       const authentication = config.authMode === "express" ? { "x-goog-api-key": credential } : { authorization: "Bearer " + credential };
       let upstream = await fetchWithGeminiRecovery(value => fetchImpl(url, { method: "POST", redirect: "error", signal, dispatcher,
         headers: { ...authentication, ...config.tierHeaders, "content-type": "application/json", accept: upstreamStream ? "text/event-stream" : "application/json" },
@@ -228,6 +258,9 @@ export function createGatewayServer(configSource, { fetchImpl = fetch, logger = 
       }
       rejectedCredentials.delete(config);
     } catch (error) {
+      // An unfinished upload must not hold a keep-alive connection open after
+      // its deadline/body limit; close only after the error response is sent.
+      if (!request.complete) response.shouldKeepAlive = false;
       status = client.signal.aborted ? 499 : deadline.aborted ? 504 : (error instanceof Problem || error.status === 400) ? error.status : 502;
       code = client.signal.aborted ? "client_disconnected" : deadline.aborted ? "upstream_timeout" :
         (error instanceof Problem || error.protocolFailure || error.status === 400) ? error.code : "upstream_protocol_error";
@@ -245,7 +278,7 @@ export function createGatewayServer(configSource, { fetchImpl = fetch, logger = 
         model: route?.id || null, upstreamModel: route?.upstreamModel || null, mode: route?.mode || null, stream, status, latencyMs: Date.now() - started,
         serviceTier: config.serviceTier || "standard",
         trafficType: ["ON_DEMAND", "ON_DEMAND_FLEX", "ON_DEMAND_PRIORITY", "PROVISIONED_THROUGHPUT"].includes(audit?.trafficType) ? audit.trafficType : null,
-        ...antiTruncationLogFields(audit), ...integrityLogFields(integrity), ...compatibilityLogFields(compatibility),
+        ...unicodeInputLogFields(unicode), ...antiTruncationLogFields(audit), ...integrityLogFields(integrity), ...compatibilityLogFields(compatibility),
         ...(droppedParams.length ? { droppedParams } : {}), ...(code ? { code } : {}) };
       events.push(event);
       if (events.length > 200) events.shift();
