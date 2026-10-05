@@ -21,6 +21,8 @@ COPY bin/ ./bin/
 COPY src/ ./src/
 COPY public/ ./public/
 COPY scripts/ ./scripts/
+# 0.6.0 起 image-input 需要 assets/fonts 下的 Noto CJK 字体
+COPY assets/ ./assets/
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 
 # 持久化目录：settings.json（GUI 保存的模型/凭据）放这里
