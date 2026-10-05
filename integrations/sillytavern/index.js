@@ -64,29 +64,36 @@ function mount() {
   check.textContent = "检查插件连接";
   check.title = "只检查酒馆服务端插件，不调用模型";
   check.addEventListener("click", () => checkBackend());
-  const unicodeLabel = document.createElement("label");
-  unicodeLabel.className = "checkbox_label";
-  const unicode = document.createElement("input");
-  unicode.type = "checkbox";
-  unicode.id = "vertex_unicode_input";
-  unicode.checked = settings().unicodeInput === true;
-  unicode.addEventListener("change", () => {
-    settings().unicodeInput = unicode.checked;
+  const inputLabel = document.createElement("label");
+  inputLabel.htmlFor = "vertex_input_encoding";
+  inputLabel.textContent = "输入转码";
+  const input = document.createElement("select");
+  input.id = inputLabel.htmlFor;
+  input.className = "text_pole";
+  for (const [value, text] of [
+    ["off", "关闭（保持原文）"],
+    ["unicode", "Unicode（最新用户楼层及其副本）"],
+    ["current-turn", "图片·当前轮（本轮用户文本）"],
+    ["all", "图片·全部会话（用户与 AI 文本）"],
+  ]) input.add(new Option(text, value));
+  const saved = settings();
+  input.value = saved.unicodeInput === true ? "unicode"
+    : ["current-turn", "all"].includes(saved.imageInput) ? saved.imageInput : "off";
+  input.addEventListener("change", () => {
+    const current = settings();
+    current.unicodeInput = input.value === "unicode";
+    current.imageInput = ["current-turn", "all"].includes(input.value) ? input.value : "off";
     context.saveSettingsDebounced();
     showStatus();
   });
-  unicodeLabel.append(unicode, document.createTextNode("Unicode 输入转码（所有 Vertex 模式）"));
-  const unicodeHint = document.createElement("small");
-  unicodeHint.id = "vertex_unicode_hint";
-  unicodeHint.textContent = "独立于抗截断；仅编码最新真实用户楼层的匹配文本，默认关闭。可能增加 token 用量；请关闭预设中的重复转码。";
-  unicode.setAttribute("aria-describedby", unicodeHint.id);
-  panel.append(label, select, unicodeLabel, unicodeHint, status, check);
+  panel.append(label, select, inputLabel, input, status, check);
   parent.append(panel);
   // Install once and chain any previously installed fetch wrapper.
   const key = Symbol.for("vertex-anti-truncation.fetch");
   if (!window[key]) {
     window[key] = true;
     window.fetch = createFetchInterceptor(window.fetch.bind(window), { origin: location.origin, getMode: mode,
+      getImageInput: () => settings().imageInput || "off",
       getUnicodeInput: () => settings().unicodeInput === true,
       getUserFloor: () => latestUserFloor(SillyTavern.getContext().chat), onStatus: updateStatus });
   }
