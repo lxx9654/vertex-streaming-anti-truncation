@@ -83,7 +83,7 @@ test("native partialArgs preserve quotes, control characters, split surrogates, 
   assert.equal(records.find(r => r.choices?.[0]?.finish_reason)?.choices[0].finish_reason, "stop");
   assert.deepEqual(records.find(r => r.usage).usage, { prompt_tokens: 12, completion_tokens: 11, total_tokens: 23,
     prompt_tokens_details: { cached_tokens: 0 }, traffic_type: "ON_DEMAND" });
-  assert.equal(records.at(-1).router_anti_truncation.restored, true);
+  assert.equal(records.findLast(r => r.router_anti_truncation).router_anti_truncation.restored, true);
   assert.ok(text.endsWith("data: [DONE]\n\n"));
 });
 
@@ -93,7 +93,7 @@ test("native transport handles full arguments, plain fallback and thought metada
   const records = parse(await restore(wire));
   assert.equal(content(records), "plain");
   assert.equal(records.find(r => r.choices?.[0]?.delta?.reasoning_content)?.choices[0].delta.reasoning_content, "meta");
-  assert.equal(records.at(-1).router_anti_truncation.restored, false);
+  assert.equal(records.findLast(r => r.router_anti_truncation).router_anti_truncation.restored, false);
   assert.equal(content(parse(await restore(call({ name, args: { content: "complete" } }) + finish()))), "complete");
 });
 

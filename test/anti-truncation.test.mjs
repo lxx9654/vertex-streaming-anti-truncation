@@ -132,7 +132,7 @@ test("SSE decodes split names, JSON escapes, unicode and byte boundaries without
   assert.equal(parsed.some(r => r.choices?.[0]?.delta?.tool_calls), false);
   assert.ok(parsed.some(r => r.choices?.[0]?.finish_reason === "stop"));
   assert.ok(parsed.some(r => r.usage?.completion_tokens === 21));
-  assert.equal(parsed.at(-1).router_anti_truncation.restored, true);
+  assert.equal(parsed.findLast(r => r.router_anti_truncation).router_anti_truncation.restored, true);
   assert.ok(text.endsWith("data: [DONE]\n\n"));
 });
 
@@ -145,7 +145,7 @@ test("ordinary SSE fallback is immediate, and only one text channel is used", as
   }
   const out = parse(await streamed([event(chunk({ content: "fallback" })), event(chunk({}, "stop")), event("[DONE]")]));
   assert.equal(contents(out), "fallback");
-  assert.equal(out.at(-1).router_anti_truncation.restored, false);
+  assert.equal(out.findLast(r => r.router_anti_truncation).router_anti_truncation.restored, false);
 });
 
 test("SSE preserves unowned tool deltas and tool finish semantics", async () => {

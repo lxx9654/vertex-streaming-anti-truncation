@@ -7,6 +7,7 @@ import http from "node:http";
 import { once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
 import { createConsole } from "../src/console-server.mjs";
+import { upstreamDispatcher } from "../src/gateway.mjs";
 import { createSettingsStore } from "../src/settings-store.mjs";
 
 async function freePort(t, keep = false) {
@@ -18,7 +19,7 @@ async function freePort(t, keep = false) {
 }
 async function fixture(t, options = {}) {
   const directory = await mkdtemp(join(tmpdir(), "vertex-console-test-"));
-  const store = createSettingsStore({ directory, env: {} });
+  const store = createSettingsStore({ directory, env: options.env ?? {} });
   const requests = [];
   const app = await createConsole({ store, fetchImpl: async (...args) => { requests.push(args); throw new Error("Unexpected inference"); }, ...options });
   await app.listen(0);
@@ -46,6 +47,9 @@ test("console protects credentials and mutations with local Host, origin, sessio
   assert.equal((await f.api("/api/config", { revision: "new", settings: f.settings }, { "x-csrf-token": "wrong" })).status, 403);
   assert.equal((await f.api("/api/probe", { confirm: false })).status, 400);
   assert.equal((await f.api("/api/validate", { settings: f.settings })).status, 200);
+  const samePort = await f.api("/api/validate", { settings: { ...f.settings, port: Number(new URL(f.base).port) } });
+  assert.equal(samePort.status, 400);
+  assert.equal((await samePort.json()).error.message, "Gateway and console must use different ports");
   assert.equal((await f.store.load()).saved, false);
   assert.equal(f.requests.length, 0);
 });
@@ -286,4 +290,177 @@ test("image input setting persists and conflicts are rejected before writeback",
  assert.equal(saved.status.active.imageInput,'current-turn');assert.equal((await f.store.load()).settings.imageInput,'current-turn');
  const rejected=await f.api('/api/config',{revision:saved.revision,settings:{unicodeInput:true}});assert.equal(rejected.status,400);
  assert.equal((await f.store.load()).settings.unicodeInput,false);assert.equal(f.requests.length,0);
+});
+
+test("a port change refuses later requests on kept-alive sockets of the retired listener", { timeout: 5000 }, async t => {
+  let release; const keys = [];
+  const f = await fixture(t, { fetchImpl: async (_url, request) => {
+    keys.push(request.headers["x-goog-api-key"]);
+    const name = JSON.parse(request.body).tools[0].functionDeclarations[0].name;
+    if (keys.length === 1) await new Promise(resolve => { release = resolve; });
+    return Response.json({ candidates: [{ content: { parts: [{ functionCall: { name, args: { content: "reply" } } }] }, finishReason: "STOP" }] });
+  } });
+  const first = await (await f.api("/api/config", { revision: "new", settings: f.settings })).json();
+  const agent = new http.Agent({ keepAlive: true, maxSockets: 1 });
+  t.after(() => agent.destroy());
+  const post = (port, content = "local test") => new Promise((resolve, reject) => {
+    const req = http.request({ host: "127.0.0.1", port, path: "/v1/chat/completions", method: "POST", agent,
+      headers: { authorization: "Bearer " + f.settings.gatewayKey, "content-type": "application/json" } }, res => {
+      let text = ""; res.setEncoding("utf8");
+      res.on("data", chunk => { text += chunk; }); res.on("end", () => resolve({ status: res.statusCode, text }));
+    });
+    req.on("error", reject);
+    req.end(JSON.stringify({ model: "gemini-3.7-flash-antitruncation", messages: [{ role: "user", content }] }));
+  });
+  const running = post(f.settings.port);
+  while (!release) await delay(5);
+  const port = await freePort(t);
+  const changed = await f.api("/api/config", { revision: first.revision, settings: { port, gatewayKey: "synthetic-rotated-local-key", apiKey: "synthetic-replacement-api-key" } });
+  assert.equal(changed.status, 200);
+  release();
+  assert.equal((await running).status, 200);
+  // The client reuses the socket that was busy at the switch; the old key must not reach Google again.
+  // A large upload (within the gateway's body limit) still gets the error, not a reset mid-upload.
+  const reused = await post(f.settings.port, "x".repeat(3 * 1024 * 1024));
+  assert.equal(reused.status, 503);
+  assert.equal(JSON.parse(reused.text).error.code, "gateway_port_changed");
+  assert.deepEqual(keys, [f.settings.apiKey]);
+  await assert.rejects(post(f.settings.port), { code: "ECONNREFUSED" });
+  for (let i = 0; i < 50 && f.app.status().activeRequests; i++) await delay(10);
+  assert.equal(f.app.status().activeRequests, 0);
+});
+
+test("the first save keeps only the selected mode's credential from the environment; null clears a stored one", async t => {
+  const directory = await mkdtemp(join(tmpdir(), "vertex-console-env-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const file = join(directory, "unrelated-service-account.json");
+  await writeFile(file, JSON.stringify({ type: "service_account", private_key: "synthetic-unrelated-private-key" }));
+  const f = await fixture(t, { env: { GOOGLE_APPLICATION_CREDENTIALS: file } });
+  const initial = await (await f.api("/api/config")).json();
+  assert.equal(initial.saved, false);
+  assert.equal(initial.settings.serviceAccountJsonSet, true);
+  // Untouched credential fields arrive blank, exactly as the GUI sends them.
+  let result = await (await f.api("/api/config", { revision: "new", settings: { ...f.settings, serviceAccountJson: "", accessToken: "" } })).json();
+  assert.equal(result.settings.serviceAccountJsonSet, false);
+  assert.equal((await readFile(join(f.directory, "settings.json"), "utf8")).includes("synthetic-unrelated-private-key"), false);
+  result = await (await f.api("/api/config", { revision: result.revision, settings: { accessToken: "synthetic-unused-token" } })).json();
+  assert.equal(result.settings.accessTokenSet, true);
+  result = await (await f.api("/api/config", { revision: result.revision, settings: { accessToken: "" } })).json();
+  assert.equal(result.settings.accessTokenSet, true, "blank keeps the stored value");
+  result = await (await f.api("/api/config", { revision: result.revision, settings: { accessToken: null } })).json();
+  assert.equal(result.settings.accessTokenSet, false);
+  assert.equal((await f.store.load()).settings.accessToken, "");
+  const required = await f.api("/api/config", { revision: result.revision, settings: { apiKey: null } });
+  assert.equal(required.status, 400);
+  assert.equal((await f.store.load()).settings.apiKey, f.settings.apiKey);
+});
+
+test("an unusable environment value leaves the console open for setup and is reported", async t => {
+  const missing = join(tmpdir(), "vertex-console-missing-" + process.pid + ".json");
+  const f = await fixture(t, { env: { GOOGLE_APPLICATION_CREDENTIALS: missing, GATEWAY_API_KEY: "synthetic-environment-key" } });
+  assert.equal(f.app.status().running, false);
+  assert.equal(f.app.status().error, "Environment settings were ignored: Unable to read the Google service-account file (GOOGLE_APPLICATION_CREDENTIALS)");
+  const loaded = await (await f.api("/api/config")).json();
+  assert.equal(loaded.saved, false);
+  assert.equal(loaded.settings.gatewayKeySet, false);
+  const saved = await f.api("/api/config", { revision: "new", settings: f.settings });
+  assert.equal(saved.status, 200);
+  assert.equal((await saved.json()).status.error, null);
+});
+
+test("an occupied console port names the console port and GUI_PORT", async t => {
+  const port = await freePort(t, true);
+  const directory = await mkdtemp(join(tmpdir(), "vertex-console-port-"));
+  const app = await createConsole({ store: createSettingsStore({ directory, env: {} }), autoStart: false });
+  t.after(async () => { await app.close(); await rm(directory, { recursive: true, force: true }); });
+  await assert.rejects(app.listen(port), { status: 409, message: `Console port ${port} is unavailable (GUI_PORT); another console may already be running` });
+});
+
+test("console probe allows the gateway its configured timeout and names local connection failures", async t => {
+  const f = await fixture(t, { fetchImpl: async (_url, request) => {
+    const name = JSON.parse(request.body).tools[0].functionDeclarations[0].name;
+    return Response.json({ candidates: [{ content: { parts: [{ functionCall: { name, args: { content: "probe reply" } } }] }, finishReason: "STOP" }] });
+  } });
+  assert.equal((await f.api("/api/config", { revision: "new", settings: { ...f.settings, timeoutMs: 900000 } })).status, 200);
+  const original = globalThis.fetch; let probe, failure = null;
+  t.after(() => { globalThis.fetch = original; });
+  globalThis.fetch = (url, init) => {
+    if (!String(url).endsWith("/v1/chat/completions")) return original(url, init);
+    probe = init;
+    return failure ? Promise.reject(failure) : original(url, init);
+  };
+  const ok = await f.api("/api/probe", { confirm: true });
+  assert.equal(ok.status, 200); assert.match(await ok.text(), /probe reply/);
+  assert.equal(probe.dispatcher, await upstreamDispatcher(930000), "the probe hop outlasts the gateway's own timeout");
+  for (const [code, status, message] of [["UND_ERR_HEADERS_TIMEOUT", 504, "The gateway did not respond in time"], ["ECONNREFUSED", 502, "Cannot reach the local gateway"]]) {
+    failure = new TypeError("fetch failed", { cause: Object.assign(new Error("fixture"), { code }) });
+    const response = await f.api("/api/probe", { confirm: true });
+    assert.equal(response.status, status);
+    assert.equal((await response.json()).error.message, message);
+  }
+});
+
+test("a save signs out other sessions only when it changes the gateway key", async t => {
+  const f = await fixture(t);
+  let result = await (await f.api("/api/config", { revision: "new", settings: f.settings })).json();
+  const login = await fetch(f.base + "/api/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ key: f.settings.gatewayKey }) });
+  const other = login.headers.get("set-cookie").split(";")[0];
+  const otherStatus = async () => (await fetch(f.base + "/api/status", { headers: { cookie: other } })).status;
+  result = await (await f.api("/api/config", { revision: result.revision, settings: { timeoutMs: 120000 } })).json();
+  assert.equal(await otherStatus(), 200);
+  result = await (await f.api("/api/config", { revision: result.revision, settings: { gatewayKey: f.settings.gatewayKey } })).json();
+  assert.equal(await otherStatus(), 200, "re-entering the same key is not a change");
+  assert.equal((await f.api("/api/config", { revision: result.revision, settings: { gatewayKey: "synthetic-rotated-local-key" } })).status, 200);
+  assert.equal(await otherStatus(), 401);
+  assert.equal((await f.api("/api/status")).status, 200, "the saving session stays signed in");
+});
+
+test("the first save signs out other bootstrap sessions and retires the bootstrap token", async t => {
+  const f = await fixture(t);
+  const bootstrapLogin = () => fetch(f.base + "/api/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ key: f.app.bootstrapToken }) });
+  const other = (await bootstrapLogin()).headers.get("set-cookie").split(";")[0];
+  assert.equal((await fetch(f.base + "/api/status", { headers: { cookie: other } })).status, 200);
+  assert.equal((await f.api("/api/config", { revision: "new", settings: f.settings })).status, 200);
+  assert.equal((await fetch(f.base + "/api/status", { headers: { cookie: other } })).status, 401);
+  assert.equal((await bootstrapLogin()).status, 401);
+  assert.equal((await f.api("/api/status")).status, 200, "the saving session stays signed in");
+});
+
+test("a failed manual start keeps its reason in status until a start succeeds", async t => {
+  const f = await fixture(t);
+  await f.api("/api/config", { revision: "new", settings: f.settings });
+  assert.equal((await f.api("/api/stop", {})).status, 200);
+  const blocker = http.createServer(); blocker.listen(f.settings.port, "127.0.0.1"); await once(blocker, "listening");
+  const failed = await f.api("/api/start", {});
+  assert.equal(failed.status, 409);
+  assert.equal(f.app.status().error, (await failed.json()).error.message);
+  await new Promise(resolve => blocker.close(resolve));
+  assert.equal((await f.api("/api/start", {})).status, 200);
+  assert.equal(f.app.status().error, null);
+});
+
+test("a gateway key saved before the visible-ASCII rule still opens the console, which names the problem", async t => {
+  const directory = await mkdtemp(join(tmpdir(), "vertex-console-legacy-"));
+  const legacyKey = "synthetic-local-key-caf\u00e9";
+  await writeFile(join(directory, "settings.json"), JSON.stringify({ version: 1, settings: { authMode: "express", apiKey: "synthetic-express-credential", gatewayKey: legacyKey, port: await freePort(t) } }));
+  const app = await createConsole({ store: createSettingsStore({ directory, env: {} }), fetchImpl: () => assert.fail("No inference") });
+  t.after(async () => { await app.close(); await rm(directory, { recursive: true, force: true }); });
+  await app.listen(0);
+  assert.equal(app.status().running, false);
+  assert.equal(app.status().error, "GATEWAY_API_KEY must contain only visible ASCII characters");
+  const base = `http://127.0.0.1:${app.server.address().port}`;
+  const login = await fetch(base + "/api/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ key: legacyKey }) });
+  assert.equal(login.status, 200);
+  const headers = { cookie: login.headers.get("set-cookie").split(";")[0], "x-csrf-token": (await login.json()).csrf, "content-type": "application/json" };
+  const { revision } = await (await fetch(base + "/api/config", { headers })).json();
+  const save = settings => fetch(base + "/api/config", { method: "POST", headers, body: JSON.stringify({ revision, settings }) });
+  for (const [settings, message] of [[{ timeoutMs: 120000 }, "GATEWAY_API_KEY must contain only visible ASCII characters"],
+    [{ gatewayKey: "synthetic-replacement-local-key", apiKey: "\u201csynthetic-express-credential\u201d" }, "VERTEX_API_KEY must contain only visible ASCII characters"]]) {
+    const rejected = await save(settings);
+    assert.equal(rejected.status, 400);
+    assert.equal((await rejected.json()).error.message, message);
+  }
+  const fixed = await save({ gatewayKey: "synthetic-replacement-local-key" });
+  assert.equal(fixed.status, 200);
+  assert.equal((await fixed.json()).status.running, true);
 });

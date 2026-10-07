@@ -83,11 +83,23 @@ test("full-mode Priority uses the compatible endpoint and its reported tier; exp
 test("native-only routes reject lossy fields before inference and never fall back to a different tier", async t => {
   const f = await fixture(t, "express", "flex");
   for (const extra of [{ unsupported: true }, { messages: [{ role: "user", content: "test", name: "extra metadata" }] },
-    { functions: [{ name: "legacy" }] }, { parallel_tool_calls: true }, { logprobs: true }, { messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: "https://example.invalid/image" } }] }] }]) {
+    { functions: [{ name: "legacy" }] }, { parallel_tool_calls: true }, { logprobs: true }, { messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: "https://example.invalid/image" } }] }] },
+    // systemInstruction is text-only, so an image in an instruction cannot be kept.
+    { messages: [{ role: "system", content: [{ type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } }] }, { role: "user", content: "test" }] }]) {
     const response = await f.post(extra); assert.equal(response.status, 400);
     assert.equal((await response.json()).error.code, "unsupported_native_fields");
   }
   assert.equal(f.requests.length, 0);
+});
+
+test("a SillyTavern-shaped image with a low detail level keeps that resolution on native routes", async t => {
+  const f = await fixture(t, "express", "flex");
+  const response = await f.post({ messages: [{ role: "user", content: [{ type: "text", text: "describe" },
+    { type: "image_url", image_url: { url: "data:image/png;base64,iVBORw0KGgo=", detail: "low" } }] }] });
+  assert.equal(response.status, 200); await response.text();
+  const body = f.requests[0].body;
+  assert.equal(body.generationConfig.mediaResolution, "MEDIA_RESOLUTION_LOW");
+  assert.deepEqual(body.contents[0].parts[1], { inlineData: { mimeType: "image/png", data: "iVBORw0KGgo=" } });
 });
 
 test("native JSON output and real tools bypass the wrapper; plain responses work with anti-truncation disabled", async t => {

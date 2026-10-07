@@ -13,7 +13,7 @@ import { modelProfiles } from "./model-profiles.mjs";
 import { completionStream, aliasStream } from "./completion-stream.mjs";
 import { convertGeminiPrefill, fetchWithGeminiRecovery, compatibilityLogFields } from "./gemini-compat.mjs";
 import { documentedUnsupported, dropParams } from "./unsupported-params.mjs";
-import { trafficType } from "./wire.mjs";
+import { googleErrorDetail, trafficType, upstreamErrorLogFields } from "./wire.mjs";
 import { waitWithSignal } from "./abort.mjs";
 
 class Problem extends Error {
@@ -41,13 +41,16 @@ function readRequest(request, limit, signal) {
     };
     const fail = error => { cleanup(); request.pause(); reject(error); };
     const abort = () => fail(signal.reason);
+    // Keep reading past the limit without buffering: replying while the client is still
+    // uploading resets the socket and the client never sees the 413. The deadline and
+    // disconnect listeners still end an oversized upload that never finishes.
     const data = chunk => {
       total += chunk.length;
-      if (total > limit) fail(new Problem(413, "request_too_large"));
-      else chunks.push(chunk);
+      if (total <= limit) chunks.push(chunk);
     };
     const end = () => {
       cleanup();
+      if (total > limit) { reject(new Problem(413, "request_too_large")); return; }
       try { resolve(JSON.parse(Buffer.concat(chunks).toString("utf8"))); }
       catch { reject(new Problem(400, "invalid_json")); }
     };
@@ -78,6 +81,25 @@ async function readCompletion(response, limit, native = false, model) {
   if (!inspected.valid) throw Object.assign(new Problem(502, inspected.reason), { integrity: inspected.integrity });
   return parsed;
 }
+// A bounded prefix of a provider error body, reduced to its fixed fields. The status
+// decides the reply even if the body is broken, slow or not JSON.
+const ERROR_DETAIL_BYTES = 16 * 1024;
+async function readUpstreamError(response, credential) {
+  const reader = response.body?.getReader();
+  if (!reader) return null;
+  const chunks = [];
+  let size = 0;
+  const timer = setTimeout(() => reader.cancel().catch(() => {}), 5000);
+  try {
+    while (size < ERROR_DETAIL_BYTES) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value); size += value.byteLength;
+    }
+  } catch { /* keep what arrived */ } finally { clearTimeout(timer); reader.cancel().catch(() => {}); }
+  try { return googleErrorDetail(JSON.parse(Buffer.concat(chunks).subarray(0, ERROR_DETAIL_BYTES).toString("utf8")), credential); }
+  catch { return null; }
+}
 function validate(payload) {
   if (!payload || Array.isArray(payload) || typeof payload !== "object") throw new Problem(400, "invalid_request");
   if (!Array.isArray(payload.messages) || !payload.messages.length || payload.messages.some(message =>
@@ -96,8 +118,10 @@ const upstreamAgents = new Map();
 export function upstreamDispatcher(timeoutMs) {
   if (!upstreamAgents.has(timeoutMs)) {
     upstreamAgents.set(timeoutMs, nativeFetch("data:,").then(response => response.arrayBuffer()).then(() => {
+      // With NODE_USE_ENV_PROXY the slot holds an EnvHttpProxyAgent, which reads the proxy
+      // environment itself and passes these timeouts to its inner agents.
       const Agent = globalThis[Symbol.for("undici.globalDispatcher.1")]?.constructor;
-      return Agent?.name === "Agent" ? new Agent({ headersTimeout: timeoutMs, bodyTimeout: timeoutMs }) : undefined;
+      return ["Agent", "EnvHttpProxyAgent"].includes(Agent?.name) ? new Agent({ headersTimeout: timeoutMs, bodyTimeout: timeoutMs }) : undefined;
     }));
   }
   return upstreamAgents.get(timeoutMs);
@@ -145,7 +169,7 @@ export function createGatewayServer(configSource, { fetchImpl = fetch, logger = 
     response.once("close", onClose);
     request.once("aborted", onClose);
     let unicode = null, image = null;
-    let stream = false, audit = null, integrity = null, status = 500, code = null, route, droppedParams = [];
+    let stream = false, audit = null, integrity = null, status = 500, code = null, route, droppedParams = [], upstreamError = null, credential = null;
     const compatibility = { prefillConverted: false, promptRetried: false };
     try {
       let payload = await readRequest(request, config.bodyLimitBytes, signal);
@@ -161,19 +185,26 @@ export function createGatewayServer(configSource, { fetchImpl = fetch, logger = 
         throw error;
       }
       response.setHeader("x-unicode-input", unicode?.reason || "disabled");
+      const convertPrefill = () => {
+        const prefill = convertGeminiPrefill(payload, route.upstreamModel, config.geminiPrefillToUser !== false);
+        payload = prefill.payload; compatibility.prefillConverted = prefill.converted;
+      };
+      // All mode also rasterizes a trailing text prefill, so switch its role first.
+      // Current-turn keeps its boundary: a trailing prefill leaves the latest user text alone.
+      if (config.imageInput === "all") convertPrefill();
       try {
         if (config.unicodeInput && config.imageInput && config.imageInput !== "off") throw Object.assign(new Error(), {status:400,code:"image_input_conflict"});
         const converted = await prepareImageInput(payload, config.imageInput || "off", config.bodyLimitBytes, {signal});
         payload = converted.payload; image = converted.metadata;
       } catch (error) {
-        if (error.code?.startsWith("image_") || error.code === "invalid_image_input_mode") throw new Problem(error.status,error.code);
-        throw error;
+        // Input errors keep their status; anything else is a local canvas or encoder failure.
+        if (Number.isInteger(error.status) && typeof error.code === "string") throw new Problem(error.status, error.code);
+        throw new Problem(503, "image_render_failed");
       }
       response.setHeader("x-image-input", image?.reason || "disabled");
       stream = payload.stream === true;
-      const prefill = convertGeminiPrefill(payload, route.upstreamModel, config.geminiPrefillToUser !== false);
-      payload = prefill.payload; compatibility.prefillConverted = prefill.converted;
-      response.setHeader("x-gemini-prefill-converted", String(prefill.converted));
+      if (config.imageInput !== "all") convertPrefill();
+      response.setHeader("x-gemini-prefill-converted", String(compatibility.prefillConverted));
       // Google documents these fields as unsupported for this model: drop them before
       // anti-truncation, native translation and the first submission.
       const unsupported = documentedUnsupported(route.upstreamModel, payload);
@@ -202,13 +233,22 @@ export function createGatewayServer(configSource, { fetchImpl = fetch, logger = 
       // Preserve local field/schema rejection before authentication.
       const upstreamPayload = { ...transport.payload, stream: upstreamStream };
       const firstBody = requestBody(upstreamPayload);
-      const credential = await waitWithSignal(() => config.accessToken(), signal);
+      // A failed token exchange (or its timeout, or an unusable service account) is a local
+      // credential problem; cancellation still reports 499/504 below.
+      credential = await waitWithSignal(() => config.accessToken(), signal)
+        .catch(() => { throw new Problem(502, "credential_error"); });
       const dispatcher = await waitWithSignal(() => upstreamDispatcher(config.timeoutMs), signal);
       signal.throwIfAborted();
       const authentication = config.authMode === "express" ? { "x-goog-api-key": credential } : { authorization: "Bearer " + credential };
+      // fetch reports network failures (DNS, connection, TLS, proxy) as TypeError("fetch failed")
+      // with a cause. A TypeError without one comes from building the request, where the only
+      // variable header is the credential (for example a key with non-Latin-1 characters).
+      // Errors while reading a body that has started keep their protocol handling.
       let upstream = await fetchWithGeminiRecovery(value => fetchImpl(url, { method: "POST", redirect: "error", signal, dispatcher,
         headers: { ...authentication, ...config.tierHeaders, "content-type": "application/json", accept: upstreamStream ? "text/event-stream" : "application/json" },
-        body: JSON.stringify(value === upstreamPayload ? firstBody : requestBody(value)) }), upstreamPayload, route.upstreamModel, {
+        body: JSON.stringify(value === upstreamPayload ? firstBody : requestBody(value)) }).catch(error => {
+        throw error instanceof TypeError ? new Problem(502, error.cause ? "upstream_unreachable" : "credential_error") : error;
+      }), upstreamPayload, route.upstreamModel, {
         settings: config.geminiPromptRetry, signal, bodyLimit: config.bodyLimitBytes,
         onRetry: () => { compatibility.promptRetried = true; },
       });
@@ -217,8 +257,11 @@ export function createGatewayServer(configSource, { fetchImpl = fetch, logger = 
         if (upstream.status === 401) rejectedCredentials.add(config);
         const retryAfter = upstream.headers.get("retry-after");
         if (retryAfter && /^\d{1,6}$/.test(retryAfter)) response.setHeader("retry-after", retryAfter);
-        await upstream.body?.cancel();
-        throw new Problem(upstream.status, upstream.routerPromptSubmissionError ? "prompt_submission_failed" : "upstream_http_error");
+        // A matched prompt rejection keeps only its code; other errors add Google's fixed fields.
+        const prompt = Boolean(upstream.routerPromptSubmissionError);
+        if (prompt) await upstream.body?.cancel().catch(() => {});
+        const detail = prompt ? null : await readUpstreamError(upstream, credential);
+        throw Object.assign(new Problem(upstream.status, prompt ? "prompt_submission_failed" : "upstream_http_error"), { upstreamError: detail });
       }
       status = upstream.status;
       // A complete upstream reply, restored and attributed to the selected alias.
@@ -231,11 +274,13 @@ export function createGatewayServer(configSource, { fetchImpl = fetch, logger = 
         return completion;
       };
       if (stream) {
+        // Like OpenAI, the empty-choices usage chunk is sent only when the client asks for it.
+        const includeUsage = payload.stream_options?.include_usage === true;
         if (buffered) {
-          upstream = completionStream(await readReply(upstream), payload.stream_options?.include_usage === true);
+          upstream = completionStream(await readReply(upstream), includeUsage);
         } else {
-          if (transport.nativeStreaming) upstream = wrapNativeTextStream(upstream, transport.toolName, route.id);
-          else if (native) upstream = wrapNativeStream(upstream, route.id, usage => { audit.trafficType = usage?.traffic_type; });
+          if (transport.nativeStreaming) upstream = wrapNativeTextStream(upstream, transport.toolName, route.id, usage => { audit.trafficType = usage?.trafficType; }, includeUsage);
+          else if (native) upstream = wrapNativeStream(upstream, route.id, usage => { audit.trafficType = usage?.traffic_type; }, includeUsage);
           upstream = aliasStream(upstream, route.id, metadata => Object.assign(audit, metadata));
           upstream = wrapAntiTruncationStream(upstream, transport.toolName, metadata => Object.assign(audit, metadata));
         }
@@ -275,11 +320,15 @@ export function createGatewayServer(configSource, { fetchImpl = fetch, logger = 
       code = client.signal.aborted ? "client_disconnected" : deadline.aborted ? "upstream_timeout" :
         (error instanceof Problem || error.protocolFailure || error.status === 400) ? error.code : "upstream_protocol_error";
       if (error instanceof Problem && error.integrity) integrity = error.integrity;
+      // Google's error fields: status and reason for logs, plus the redacted message for the client.
+      // Stream readers keep the raw error event in memory only; it is reduced here, with this request's credential.
+      if (status !== 499 && !deadline.aborted) upstreamError = error.upstreamError ?? (error.upstreamBody ? googleErrorDetail(error.upstreamBody, credential) : null);
       integrity = { ...integrity, outcome: status === 499 ? "cancelled" :
         ["empty", "incomplete"].includes(integrity?.outcome) ? integrity.outcome : "error" };
       if (response.headersSent) response.destroy();
       else send(response, status === 499 ? 502 : status, { error: { code, message: code, type: "gateway_error", requestId,
-        ...integrityLogFields(integrity), ...(error.status === 400 && error.param ? { param: error.param } : {}) } });
+        ...integrityLogFields(integrity), ...(error.status === 400 && error.param ? { param: error.param } : {}),
+        ...(upstreamError ? { upstreamError } : {}) } });
     } finally {
       active--;
       response.off("close", onClose);
@@ -289,7 +338,7 @@ export function createGatewayServer(configSource, { fetchImpl = fetch, logger = 
         serviceTier: config.serviceTier || "standard",
         trafficType: ["ON_DEMAND", "ON_DEMAND_FLEX", "ON_DEMAND_PRIORITY", "PROVISIONED_THROUGHPUT"].includes(audit?.trafficType) ? audit.trafficType : null,
         ...imageInputLogFields(image), ...unicodeInputLogFields(unicode), ...antiTruncationLogFields(audit), ...integrityLogFields(integrity), ...compatibilityLogFields(compatibility),
-        ...(droppedParams.length ? { droppedParams } : {}), ...(code ? { code } : {}) };
+        ...upstreamErrorLogFields(upstreamError), ...(droppedParams.length ? { droppedParams } : {}), ...(code ? { code } : {}) };
       events.push(event);
       if (events.length > 200) events.shift();
       logger(event);

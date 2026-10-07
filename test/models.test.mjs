@@ -167,7 +167,7 @@ test("normal compatible streams reject premature EOF and provider error events",
     upstream.close();
     await assert.rejects(async () => { while (!(await reader.read()).done) { /* Drain until the failure. */ } });
     assert.equal(f.events.at(-1).status, 502);
-    assert.equal(f.events.at(-1).code, "upstream_protocol_error");
+    assert.equal(f.events.at(-1).code, ending === "error" ? "upstream_stream_error" : "upstream_protocol_error");
     assert.equal(f.events.at(-1).antiTruncation.streamDone, false);
     assert.equal(JSON.stringify(f.events).includes("private provider error"), false);
   }

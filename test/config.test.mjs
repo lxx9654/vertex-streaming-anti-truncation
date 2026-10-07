@@ -1,10 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, writeFile, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { generateKeyPairSync } from "node:crypto";
-import { loadConfig, MODEL_ID, buildConfig, DEFAULT_SETTINGS, publicSettings } from "../src/config.mjs";
+import { parseEnv } from "node:util";
+import { loadConfig, settingsFromEnv, MODEL_ID, buildConfig, DEFAULT_SETTINGS, publicSettings } from "../src/config.mjs";
 
 const env = { GATEWAY_API_KEY: "synthetic-local-key-for-tests", VERTEX_PROJECT_ID: "example-project", VERTEX_ACCESS_TOKEN: "synthetic-oauth-token" };
 
@@ -90,4 +91,36 @@ test("Unicode setting defaults off and validates a strict global boolean", async
   await assert.rejects(loadConfig({ ...env, UNICODE_INPUT: "1" }));
   assert.throws(() => buildConfig({ ...DEFAULT_SETTINGS, unicodeInput: "true", authMode: "access-token", projectId: env.VERTEX_PROJECT_ID,
     gatewayKey: env.GATEWAY_API_KEY, accessToken: env.VERTEX_ACCESS_TOKEN }), /toggle/);
+});
+
+test("environment errors name their variable and an unedited .env.example still loads for GUI setup", async () => {
+  const missing = join(tmpdir(), "vertex-config-missing-" + process.pid);
+  await assert.rejects(loadConfig({ ...env, GOOGLE_APPLICATION_CREDENTIALS: missing }), /GOOGLE_APPLICATION_CREDENTIALS, VERTEX_ACCESS_TOKEN or VERTEX_API_KEY/);
+  await assert.rejects(loadConfig({ ...env, VERTEX_ACCESS_TOKEN: "", GOOGLE_APPLICATION_CREDENTIALS: missing }), /\(GOOGLE_APPLICATION_CREDENTIALS\)/);
+  await assert.rejects(loadConfig({ ...env, GEMINI_PROMPT_RETRY_TEXT_FILE: missing }), /\(GEMINI_PROMPT_RETRY_TEXT_FILE\)/);
+  const template = parseEnv(await readFile(new URL("../.env.example", import.meta.url), "utf8"));
+  assert.equal((await settingsFromEnv(template)).serviceAccountJson, "");
+  // The CLI names the choices when the template's credential lines are still commented out.
+  await assert.rejects(loadConfig({ ...template, GATEWAY_API_KEY: env.GATEWAY_API_KEY }), { message: "Configure one Google authentication method: GOOGLE_APPLICATION_CREDENTIALS, VERTEX_ACCESS_TOKEN or VERTEX_API_KEY" });
+});
+
+test("keys and tokens must be visible ASCII so every client can send them in a header", async () => {
+  const gateway = "GATEWAY_API_KEY must contain only visible ASCII characters";
+  const token = "VERTEX_ACCESS_TOKEN must contain only visible ASCII characters";
+  for (const [override, message] of [
+    [{ GATEWAY_API_KEY: "synthetic-local-key-\u201cquoted\u201d" }, gateway],
+    [{ GATEWAY_API_KEY: "\u672c\u5730\u7f51\u5173\u5bc6\u94a5".repeat(3) }, gateway],
+    [{ GATEWAY_API_KEY: "synthetic-local-key-caf\u00e9" }, gateway],
+    [{ VERTEX_ACCESS_TOKEN: "synthetic\uff0doauth-token" }, token],
+    [{ VERTEX_ACCESS_TOKEN: "synthetic\u0001oauth-token" }, token],
+  ]) await assert.rejects(loadConfig({ ...env, ...override }), { message });
+  await assert.rejects(loadConfig({ GATEWAY_API_KEY: env.GATEWAY_API_KEY, VERTEX_API_KEY: "\u201csynthetic-express-key\u201d" }),
+    { message: "VERTEX_API_KEY must contain only visible ASCII characters" });
+  // Whitespace keeps its earlier messages.
+  await assert.rejects(loadConfig({ ...env, GATEWAY_API_KEY: "synthetic local key for tests" }), /at least 16 characters/);
+  await assert.rejects(loadConfig({ ...env, VERTEX_ACCESS_TOKEN: "synthetic\u3000token" }), { message: "Invalid VERTEX_ACCESS_TOKEN" });
+  // Settings saved before the rule are still readable; only strict validation rejects them.
+  const legacy = { ...DEFAULT_SETTINGS, authMode: "access-token", projectId: env.VERTEX_PROJECT_ID, gatewayKey: "synthetic-local-key-caf\u00e9", accessToken: "synthetic\u201ctoken" };
+  assert.equal(buildConfig(legacy, { requireAscii: false }).gatewayKey, legacy.gatewayKey);
+  assert.throws(() => buildConfig(legacy), { message: gateway });
 });

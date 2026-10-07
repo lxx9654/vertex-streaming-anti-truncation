@@ -2,6 +2,33 @@
 
 [中文](CHANGELOG.zh-CN.md) | English
 
+## Unreleased
+
+Fixes and refinements after 0.6.0. Version numbers are unchanged.
+
+- **Provider error details.** Provider HTTP errors (`upstream_http_error`) and provider error events that arrive before any output (`upstream_stream_error` from the compatible endpoint, `native_stream_error`) now include `upstreamError` in the client error: Google's status, its ErrorInfo reason and the error message with markup, email addresses, key-like strings, long tokens and the request's own credential removed, capped at 240 characters. Logs and the event list keep only the status and reason. On native routes, `responseIntegrity.nativeFinishReason` records Google's own finish code, such as `MALFORMED_FUNCTION_CALL`.
+- **Clearer failures.** New error codes: `credential_error` (502: the token exchange failed, or the key or token contains characters that cannot be sent in an HTTP header), `upstream_unreachable` (502: DNS, connection, TLS or proxy failure) and `image_render_failed` (503: local rendering failure). `upstream_protocol_error` now means only a genuine protocol or stream violation. A broken or stalled error body no longer hides the provider status or `Retry-After`: the error body is read for at most about 5 seconds, with or without prompt retry. An oversized request now actually receives `413 request_too_large`; an upload that never finishes ends with `504 upstream_timeout` at the deadline.
+- **Streams.** On native routes and buffered SSE replies, the empty-choices usage chunk is sent only when the request sets `stream_options.include_usage: true`. `router_anti_truncation` now arrives on the finish chunk instead of a separate empty-choices chunk.
+- **Native translation.** A parameterless function call without `args` is accepted. Only leading system/developer messages become `systemInstruction`; later ones are sent in place as user text. Images in system/developer messages return 400. An image's `detail` sets the request-wide media resolution only when every image asks for the same level. `unsupported_native_schema` paths now name the tool's index and the node that holds an unresolved `$ref`.
+- **Credentials and settings.** The gateway key must be 16–512 visible ASCII characters with no spaces; Express API keys and access tokens containing non-ASCII characters (such as smart quotes) are rejected when saved. A failed early token refresh keeps using the still-valid cached token. An invalid environment value no longer blocks the console: environment settings are ignored and the reason is shown. The first save stores only the selected mode's credential, and a checkbox can delete the other modes' saved credentials. Changing the gateway key signs out other console sessions; the first save also signs out other sessions opened with the setup link, and other saves keep sign-ins. After an API port change, the old port answers `503 gateway_port_changed`. `npm run gateway` without any credential variable now names the variables to set.
+- **Upgrade note.** A gateway key, Express API key or access token saved earlier with non-ASCII characters (including letters such as `é`) now stops the gateway from starting, both at console autostart and with `npm run gateway`. The console still opens: sign in with the old key and save a visible-ASCII replacement.
+- **Console.** Chinese messages for more errors. The connection test shows the transport, the failure cause and the request ID, and no longer stops at Node's default 300-second wait. The request log shows Unicode and image-input results and readable transport labels. The region chosen before Express, Flex or Priority forced `global` comes back, and an unsaved draft survives a session expiry. Screen-reader and contrast fixes.
+- **Input encoding.** Image pages are now lossless WebP instead of PNG: the pixels are identical and full pages are smaller. Line wrapping no longer blocks the event loop for seconds on long text, and text never runs past the page edge. Invisible format characters (ZWSP, ZWNJ, WJ, BOM, VS15) no longer reject a request. In `all` mode a trailing Gemini 3.7/3.8 text prefill becomes a user turn before rendering. Unicode input leaves matches inside tags or existing `⟦U:…⟧` blocks elsewhere in a message unchanged; only complete one-line tags in the surrounding text count for this.
+- **SillyTavern integration.** The panel shows the image page count, says when nothing was converted and when an image request is still delivered without streaming, and names the cause when image input refuses a request. Before an image request, the frontend checks that the server plugin's version matches. Plain anti-truncation requests over 8 MiB use Tavern's own route.
+- **Tooling and docs.** CI adds macOS, the minimum supported Node.js 22.9.0 and a 15-minute job limit. `Start-GUI.cmd` checks for Node.js 22.9+ first. The release check detects more credential and path leaks, including this package's gateway-key format. The docs add proxy setup (`NODE_USE_ENV_PROXY`), first-run import from the environment, how to report a security problem and the Genesis Corridor credit.
+- Checked with local tests and simulated upstreams only; no live Google, proxy, browser or SillyTavern check has been made for these changes yet. See [validation](docs/VALIDATION.en.md).
+
+## 0.6.0 (experimental) / SillyTavern integration 0.3.0
+
+- Add an installable SillyTavern integration: a UI extension and a server plugin add the anti-truncation selector to Tavern's own Google Vertex AI connection panel, reuse Tavern's saved credentials and run inside the Tavern process. It is off by default. Install and update both halves together; the panel checks that their versions match. See the [guide (Chinese)](docs/SILLYTAVERN.md).
+- Add opt-in Unicode input. The default-off `UNICODE_INPUT` switch applies to all models and encodes the Han characters and ASCII letters of the latest real user floor as `⟦U:…⟧`. Clients must send `router_unicode_input.user_floor`: a missing floor returns `400 unicode_floor_required`, and an encoded request over the size limit returns `413 unicode_input_too_large`. A Tavern Helper script supplies the floor for custom API connections. See the [acceptance record](docs/UNICODE-INPUT-AUDIT.md).
+- Add opt-in current-turn/all-conversation text-to-PNG input, mutually exclusive with Unicode; preserve system instructions and tool contracts.
+- Bundle Noto CJK font and canvas runtime dependency; package dependency lock and font license.
+- Bound rendering and fail explicitly on unsupported input; keep fixed-field diagnostics. See [image input validation](docs/IMAGE-INPUT-VALIDATION.md).
+- The Tavern panel uses one 输入转码 (input encoding) selector with off, Unicode, image (current turn) and image (whole conversation), so Unicode and image input stay mutually exclusive.
+- Fixes: on the streaming anti-truncation path, native prompt blocks with codes such as `OTHER` or `JAILBREAK` are reported as `content_filter` instead of `error`, and `native_finish_reason` keeps Google's original code. SSE parsing accepts CRLF and mixed line endings, including a CRLF split across chunks. Concurrent recovery of a stale settings lock is serialized, so one writer cannot delete another's new lock. Cancellation and the deadline also stop waits for authentication and the request body. See the [2026-09-30 review (Chinese)](docs/AUDIT-2026-09-30.md).
+- Pass 135 local tests and 85 release-file checks. See [validation](docs/VALIDATION.en.md).
+
 ## 0.5.2 (experimental)
 
 - A settings lock left behind by a process that exited mid-save no longer makes every later save fail: locks older than a minute are cleared. Saving while another process saves shows a Chinese message in the console.
@@ -76,9 +103,3 @@ The first standalone release extracts the Gemini 3.7 Flash text-tool transport f
 - [Xeltra233 / Antigravity-gateway](https://github.com/Xeltra233/Antigravity-gateway) is credited for the transport design, with its MIT license preserved.
 
 The default checks use simulated upstream responses. See [validation](docs/VALIDATION.en.md) for what has and has not been tested.
-
-## 0.6.0 / SillyTavern UI 0.3.0
-
-- Add opt-in current-turn/all-conversation text-to-PNG input, mutually exclusive with Unicode; preserve system instructions and tool contracts.
-- Bundle Noto CJK font and canvas runtime dependency; package dependency lock and font license.
-- Bound rendering and fail explicitly on unsupported input; keep fixed-field diagnostics.

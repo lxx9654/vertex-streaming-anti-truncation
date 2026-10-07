@@ -120,11 +120,14 @@ test("native HTTP text arrives before upstream completion, with matching metadat
   assert.equal(visible(wire), "The river flows.");
   assert.equal(wire.includes("[DONE]"), true);
   assert.equal(records(wire).some(x => x.choices?.[0]?.delta?.tool_calls), false);
-  assert.equal(records(wire).find(x => x.usage).usage.traffic_type, "ON_DEMAND");
+  // Without stream_options.include_usage there is no empty-choices chunk; the tier still reaches the log.
+  assert.equal(records(wire).some(x => Array.isArray(x.choices) && !x.choices.length), false);
+  assert.equal(records(wire).find(x => x.choices?.[0]?.finish_reason).router_anti_truncation.restored, true);
   const events = (await (await f.get("/admin/events")).json()).events;
   assert.equal(events[0].requestId, response.headers.get("x-request-id"));
   assert.deepEqual(events[0].antiTruncation, { transport: "tool-transport-native-streaming", restored: true, finishReason: "stop", streamDone: true });
   assert.deepEqual(f.events, events);
+  assert.equal(events[0].trafficType, "ON_DEMAND");
   const logs = JSON.stringify(events);
   for (const privateValue of [key, token, payload.messages[0].content, "The river", "router_emit_"]) assert.equal(logs.includes(privateValue), false);
   assert.equal(f.requests.length, 1);
@@ -304,7 +307,7 @@ test("image input reaches compatible and native routes; failures do not call ups
  for (const nativeOnly of [false,true]) {
   const f=await fixture(t, req => {
    if(nativeOnly){assert.ok(req.json.contents[0].parts[0].inlineData);return Response.json({candidates:[{content:{parts:[{text:'OK'}]},finishReason:'STOP'}]});}
-   assert.match(req.json.messages[0].content[0].image_url.url,/^data:image\/png;base64,/);
+   assert.match(req.json.messages[0].content[0].image_url.url,/^data:image\/(?:png|webp);base64,/);
    return Response.json({choices:[{message:{role:'assistant',content:'OK'},finish_reason:'stop'}]});
   },{imageInput:'current-turn',antiTruncation:false,nativeOnly});
   const response=await f.post(payload);assert.equal(response.status,200);assert.equal(response.headers.get('x-image-input'),'encoded');await response.json();

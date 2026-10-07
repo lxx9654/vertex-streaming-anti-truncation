@@ -2,6 +2,33 @@
 
 中文 | [English](CHANGELOG.md)
 
+## 未发布
+
+0.6.0 之后的修复与改进，版本号不变。
+
+- **上游错误详情**：上游 HTTP 错误（`upstream_http_error`）以及输出开始前到达的上游错误事件（兼容接口的 `upstream_stream_error`、原生接口的 `native_stream_error`）会在客户端错误中附带 `upstreamError`：Google 的状态码、ErrorInfo 原因码，以及去除标记、邮箱、密钥类字符串、长令牌和本次请求所用凭据后的错误说明，最多 240 个字符。日志和事件列表只保留状态码与原因码。原生接口下，`responseIntegrity.nativeFinishReason` 记录 Google 自己的结束代码，例如 `MALFORMED_FUNCTION_CALL`。
+- **失败原因更明确**：新增错误码 `credential_error`（502：换取访问令牌失败，或密钥/令牌含有无法放进 HTTP 请求头的字符）、`upstream_unreachable`（502：DNS、连接、TLS 或代理失败）和 `image_render_failed`（503：本地图片渲染失败）。`upstream_protocol_error` 现在只表示真正的协议或流错误。上游错误正文损坏或迟迟不结束时，不再掩盖上游状态码和 `Retry-After`：无论是否开启提示词重试，错误正文最多读取约 5 秒。超大请求现在确实收到 `413 request_too_large`；一直没有传完的上传在超时后以 `504 upstream_timeout` 结束。
+- **流式回复**：原生接口和非流式抗截断转成的 SSE 回复，只有请求设置 `stream_options.include_usage: true` 时才发送 choices 为空的用量片段。`router_anti_truncation` 改为随结束片段发送，不再单独发送一个 choices 为空的片段。
+- **原生接口翻译**：接受不带 `args` 的无参数函数调用。只有开头连续的 system/developer 消息进入 `systemInstruction`，之后的按原位置作为 user 文本发送。system/developer 消息中的图片返回 400。只有所有图片要求同一级别时，图片的 `detail` 才设定整个请求的媒体分辨率。`unsupported_native_schema` 的参数路径现在指明是第几个工具，以及未解析的 `$ref` 所在的节点。
+- **凭据与配置**：网关密钥须为 16–512 个可见 ASCII 字符，不含空格；含中文引号等非 ASCII 字符的 Express API Key 和访问令牌在保存时即被拒绝。提前刷新访问令牌失败时，继续使用尚未过期的缓存令牌。环境变量中的值无效时不再阻止打开控制台：忽略全部环境设置并显示原因。首次保存只写入所选鉴权方式的凭据，并可勾选删除其他鉴权方式已保存的凭据。更换网关密钥会让其他控制台会话退出；首次保存也会让其他通过设置链接登录的会话退出，其他保存不影响登录。更换 API 端口后，旧端口返回 `503 gateway_port_changed`。没有设置任何凭据变量时，`npm run gateway` 会提示应设置哪些变量。
+- **升级提示**：之前保存的网关密钥、Express API Key 或访问令牌若含非 ASCII 字符（包括 `é` 这类字母），网关将无法启动，控制台自动启动和 `npm run gateway` 都是如此。控制台仍可打开：用原密钥登录，保存一个只含可见 ASCII 字符的新值即可。
+- **控制台**：更多错误显示中文说明。连接测试显示传输方式、失败原因和请求 ID，也不再受 Node 默认 300 秒等待上限的影响。请求日志显示 Unicode 与图片输入结果，传输方式改为可读名称。Express、Flex 或 Priority 强制使用 `global` 后再切回时，恢复之前选择的地区；会话过期时保留未保存的草稿。改进读屏与对比度。
+- **输入转码**：图片页改为无损 WebP，不再使用 PNG：像素完全相同，整页图片更小。长文本换行不再阻塞事件循环数秒，文字也不会超出页面边缘。不可见的格式字符（ZWSP、ZWNJ、WJ、BOM、VS15）不再导致整个请求被拒。全部会话模式下，末尾的 Gemini 3.7/3.8 文本预填充会先改为 user 再渲染。Unicode 输入转码不再替换消息中其他位置的标签或已有 `⟦U:…⟧` 编码块里的匹配内容；这里只认不跨行的完整标签。
+- **SillyTavern 集成**：面板显示图片页数，说明本次没有可转换的文本、以及图片请求仍按非流式交付的情况；图片输入拒绝请求时写明原因。发送图片请求前，前端会确认服务端插件版本一致。超过 8 MiB 的普通抗截断请求改走酒馆原流程。
+- **工具与文档**：CI 增加 macOS、最低支持版本 Node.js 22.9.0 和 15 分钟任务时限。`Start-GUI.cmd` 先检查 Node.js 22.9+。发布检查能发现更多凭据和路径泄露，包括本项目的网关密钥格式。文档补充代理设置（`NODE_USE_ENV_PROXY`）、首次启动从环境变量导入、报告安全漏洞的方式和创世回廊署名。
+- 本次改动只经过本地测试和模拟上游检查，尚未做真实 Google、代理、浏览器或 SillyTavern 验证，详见[验收说明](docs/VALIDATION.md)。
+
+## 0.6.0（实验版）/ SillyTavern 集成 0.3.0
+
+- 新增可安装的 SillyTavern 集成：UI 扩展加服务端插件，把抗截断选项加到酒馆自带的 Google Vertex AI 连接面板，复用酒馆已保存的凭据，在酒馆进程内运行。默认关闭；前后端需一起安装和更新，面板会检查两端版本是否一致。详见[安装说明](docs/SILLYTAVERN.md)。
+- 新增可选的 Unicode 输入转码：默认关闭的 `UNICODE_INPUT` 总开关对所有模型生效，把最新真实用户楼层中的汉字和 ASCII 字母编码为 `⟦U:…⟧`。客户端须提供 `router_unicode_input.user_floor`：缺少时返回 `400 unicode_floor_required`，编码后超过大小上限返回 `413 unicode_input_too_large`。附带供自定义 API 连接使用的 Tavern Helper 楼层脚本。详见[验收记录](docs/UNICODE-INPUT-AUDIT.md)。
+- 新增可选的文字转 PNG 输入（当前轮或全部会话），与 Unicode 输入互斥；system 指令和工具调用保持原样。
+- 随附 Noto CJK 字体和 canvas 运行依赖；发布包包含依赖锁定文件和字体许可证。
+- 渲染有上限，遇到不支持的输入明确报错，不改回明文；诊断只记录固定字段。详见[图片输入验收](docs/IMAGE-INPUT-VALIDATION.md)。
+- 酒馆面板改为一个“输入转码”下拉框：关闭、Unicode、图片·当前轮、图片·全部会话，自动保持 Unicode 与图片互斥。
+- 修复：流式抗截断路径上，原生提示词拦截（如 `OTHER`、`JAILBREAK`）改报 `content_filter`，不再报 `error`，`native_finish_reason` 保留 Google 原始代码。SSE 解析支持 CRLF 与混合换行，包括跨数据块的 CRLF。多个进程同时恢复过期配置锁时改为串行，不会删除其他写入者的新锁。等待鉴权和请求体时也会响应取消或超时。详见 [2026-09-30 检查记录](docs/AUDIT-2026-09-30.md)。
+- 通过 135 项本地测试及 85 个发布文件检查，详见[验收说明](docs/VALIDATION.md)。
+
 ## 0.5.2（实验版）
 
 - 保存配置时程序意外退出留下的锁文件，不再让之后的每次保存都失败：超过 1 分钟的残留锁会被自动清除。与另一个进程同时保存时，控制台显示中文提示。
@@ -76,9 +103,3 @@
 - 标注方案来源 [Xeltra233 / Antigravity-gateway](https://github.com/Xeltra233/Antigravity-gateway)，保留其 MIT 许可证。
 
 默认检查使用模拟上游响应。已完成和未完成的测试范围见[验收说明](docs/VALIDATION.md)。
-
-## 0.6.0 / SillyTavern UI 0.3.0
-
-- Add opt-in current-turn/all-conversation text-to-PNG input, mutually exclusive with Unicode; preserve system instructions and tool contracts.
-- Bundle Noto CJK font and canvas runtime dependency; package dependency lock and font license.
-- Bound rendering and fail explicitly on unsupported input; keep fixed-field diagnostics.

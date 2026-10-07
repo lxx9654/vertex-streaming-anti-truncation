@@ -4,7 +4,7 @@ import http from "node:http";
 import { once } from "node:events";
 import { prepareSillyTavernRequest, restoreSillyTavernResponse } from "../src/sillytavern.mjs";
 import { createGenerateHandler, connectionForRequest } from "../integrations/sillytavern/server.mjs";
-import { createFetchInterceptor, bypassReason, GENERATE_PATH, PLUGIN_PATH } from "../integrations/sillytavern/shared.js";
+import { createFetchInterceptor, bypassReason, BODY_LIMIT, GENERATE_PATH, PLUGIN_PATH } from "../integrations/sillytavern/shared.js";
 import { sseData } from "../src/wire.mjs";
 
 const body = { chat_completion_source: "vertexai", model: "gemini-3-flash-preview", stream: true,
@@ -313,10 +313,13 @@ test("Unicode floor comes from the latest real user, including empty-floor failu
 });
 
 test("image option forwards only eligible plugin requests and forces buffered image transport",async()=>{
- const calls=[];
- const intercept=createFetchInterceptor(async(...args)=>{calls.push(args);return new Response('OK');},{origin:'http://localhost',getMode:()=> 'streaming',getImageInput:()=> 'current-turn'});
+ const calls=[],statuses=[];
+ const intercept=createFetchInterceptor(async(...args)=>{calls.push(args);return new Response('OK');},{origin:'http://localhost',getMode:()=> 'streaming',getImageInput:()=> 'current-turn',onStatus:s=>statuses.push(s)});
  await intercept(GENERATE_PATH,{method:'POST',body:JSON.stringify(body)});
  assert.equal(JSON.parse(calls[0][1].body).vertex_image_input,'current-turn');
+ // The refusal names the actual cause so the panel does not guess.
+ await assert.rejects(intercept(GENERATE_PATH,{method:'POST',body:JSON.stringify({...body,model:'gemini-3-pro-image'})}),/image_input_requires/);
+ assert.deepEqual(statuses.at(-1),{error:'image_input_requires_supported_request',bypass:'model'});
  const {prepareImageInput}=await import('../src/image-input.mjs');
  const converted=await prepareImageInput(body,'current-turn');
  const prepared=prepareSillyTavernRequest(request({...converted.payload,vertex_image_input:'current-turn'}),adapters);
@@ -336,4 +339,131 @@ test("image-only plugin mode is independent from anti-truncation and restores na
  const intercept=createFetchInterceptor(async(...args)=>{calls.push(args);return new Response('OK');},{origin:'http://localhost',getMode:()=> 'off',getImageInput:()=> 'current-turn'});
  await intercept(GENERATE_PATH,{method:'POST',body:JSON.stringify(body)});
  assert.equal(calls[0][0],PLUGIN_PATH+'/generate');assert.equal(JSON.parse(calls[0][1].body).vertex_anti_truncation,'off');
+});
+
+test("image input is refused until the server plugin is confirmed; anti-truncation alone is not gated", async () => {
+  const calls = [], statuses = [];
+  let ready = false, checks = 0, image = "current-turn";
+  const intercept = createFetchInterceptor(async (...args) => { calls.push(args); return new Response("OK"); }, { origin: "http://localhost",
+    getMode: () => "streaming", getImageInput: () => image, ensureBackend: async () => { checks++; return ready; }, onStatus: s => statuses.push(s) });
+  await assert.rejects(intercept(GENERATE_PATH, { method: "POST", body: JSON.stringify(body) }), /plugin_not_ready/);
+  assert.equal(calls.length, 0);
+  assert.deepEqual(statuses.at(-1), { error: "plugin_not_ready" });
+  ready = true;
+  await intercept(GENERATE_PATH, { method: "POST", body: JSON.stringify(body) });
+  assert.equal(JSON.parse(calls[0][1].body).vertex_image_input, "current-turn");
+  image = "off";
+  await intercept(GENERATE_PATH, { method: "POST", body: JSON.stringify(body) });
+  assert.equal(checks, 2);
+  assert.equal(calls[1][0], PLUGIN_PATH + "/generate");
+});
+
+test("anti-truncation requests above the plugin limit keep ST's route; image requests do not fall back", async () => {
+  const calls = [], statuses = [];
+  let image = "off";
+  const intercept = createFetchInterceptor(async (...args) => { calls.push(args); return new Response("OK"); }, { origin: "http://localhost",
+    getMode: () => "buffered", getImageInput: () => image, onStatus: s => statuses.push(s) });
+  const large = { ...body, messages: [{ role: "user", content: "a".repeat(BODY_LIMIT) }] };
+  const init = { method: "POST", body: JSON.stringify(large) };
+  await intercept(GENERATE_PATH, init);
+  assert.equal(calls.at(-1)[0], GENERATE_PATH);
+  assert.strictEqual(calls.at(-1)[1], init);
+  assert.deepEqual(statuses.at(-1), { bypass: "too-large" });
+  // Multi-byte text is measured in UTF-8 bytes, as the server measures it.
+  await intercept(GENERATE_PATH, { method: "POST", body: JSON.stringify({ ...body, messages: [{ role: "user", content: "字".repeat(BODY_LIMIT / 3 + 1) }] }) });
+  assert.equal(calls.at(-1)[0], GENERATE_PATH);
+  await intercept(GENERATE_PATH, { method: "POST", body: JSON.stringify(body) });
+  assert.equal(calls.at(-1)[0], PLUGIN_PATH + "/generate");
+  image = "all";
+  await intercept(GENERATE_PATH, init);
+  assert.equal(calls.at(-1)[0], PLUGIN_PATH + "/generate");
+  assert.throws(() => prepareSillyTavernRequest(request({ ...large, vertex_image_input: "all" }), adapters), { code: "request_too_large", status: 413 });
+});
+
+test("plugin failures report their fixed code without consuming the response", async () => {
+  const statuses = [];
+  let reply;
+  const intercept = createFetchInterceptor(async () => reply(), { origin: "http://localhost", getMode: () => "buffered", onStatus: s => statuses.push(s) });
+  const failure = { error: { code: "image_input_unsupported_characters", message: "图片输入转换失败" } };
+  reply = () => Response.json(failure, { status: 400 });
+  const response = await intercept(GENERATE_PATH, { method: "POST", body: JSON.stringify(body) });
+  assert.deepEqual(statuses.at(-1), { error: "image_input_unsupported_characters", status: 400 });
+  assert.deepEqual(await response.json(), failure);
+  reply = () => new Response("<html>Cannot POST</html>", { status: 404 });
+  await intercept(GENERATE_PATH, { method: "POST", body: JSON.stringify(body) });
+  assert.deepEqual(statuses.at(-1), { error: 404 });
+  reply = () => Response.json(failure, { status: 429 });
+  await intercept(GENERATE_PATH, { method: "POST", body: JSON.stringify({ ...body, tools: [{}] }) });
+  assert.deepEqual(statuses.at(-1), { bypass: "existing-tools" });
+});
+
+test("image conversion failures are labelled as image input, not anti-truncation", async t => {
+  const upstream = [];
+  const handler = createGenerateHandler(adapters, { fetchImpl: async (...args) => { upstream.push(args); return new Response("busy", { status: 429 }); } });
+  const server = http.createServer(async (req, res) => {
+    const chunks = []; for await (const chunk of req) chunks.push(chunk);
+    req.body = JSON.parse(Buffer.concat(chunks).toString()); req.user = { directories: {} };
+    res.status = value => { res.statusCode = value; return res; };
+    res.json = value => res.end(JSON.stringify(value));
+    await handler(req, res);
+  });
+  server.listen(0, "127.0.0.1"); await once(server, "listening");
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const post = async extra => {
+    const response = await fetch(`http://127.0.0.1:${server.address().port}`, { method: "POST", body: JSON.stringify({ ...body, ...extra }) });
+    return { status: response.status, error: (await response.json()).error };
+  };
+  const emoji = await post({ vertex_anti_truncation: "off", vertex_image_input: "all", messages: [{ role: "user", content: "你好😀" }] });
+  assert.equal(emoji.status, 400);
+  assert.equal(emoji.error.code, "image_input_unsupported_characters");
+  assert.match(emoji.error.message, /^图片输入转换失败/);
+  assert.equal(upstream.length, 0);
+  const rejected = await post({ vertex_anti_truncation: "off", vertex_image_input: "current-turn" });
+  assert.equal(rejected.status, 429);
+  assert.equal(rejected.error.message, "Vertex 图片输入请求失败。 (vertex_upstream_http_error, HTTP 429)");
+  const wrapped = await post({ vertex_image_input: "current-turn" });
+  assert.match(wrapped.error.message, /^Vertex 抗截断请求失败。/);
+  assert.equal(upstream.length, 2);
+});
+
+test("image requests report the plugin's conversion outcome, including text sent unchanged", async t => {
+  const statuses = [];
+  let headers = { "x-image-input": "no-text", "x-image-input-pages": "0" };
+  const intercept = createFetchInterceptor(async () => new Response("OK", { headers }), { origin: "http://localhost",
+    getMode: () => "streaming", getImageInput: () => "current-turn", onStatus: s => statuses.push(s) });
+  await intercept(GENERATE_PATH, { method: "POST", body: JSON.stringify(body) });
+  assert.deepEqual(statuses.at(-1), { mode: "streaming", image: { mode: "current-turn", reason: "no-text", pages: 0, stream: true } });
+  headers = { "x-image-input": "encoded", "x-image-input-pages": "2" };
+  await intercept(GENERATE_PATH, { method: "POST", body: JSON.stringify(body) });
+  assert.deepEqual(statuses.at(-1).image, { mode: "current-turn", reason: "encoded", pages: 2, stream: true });
+  // The panel's buffering note depends on whether ST itself asked to stream.
+  await intercept(GENERATE_PATH, { method: "POST", body: JSON.stringify({ ...body, stream: false }) });
+  assert.equal(statuses.at(-1).image.stream, false);
+
+  const sent = [];
+  const handler = createGenerateHandler(adapters, { fetchImpl: async (url, init) => {
+    sent.push(JSON.parse(init.body));
+    return Response.json({ candidates: [{ content: { parts: [{ text: "OK" }] }, finishReason: "STOP" }] });
+  } });
+  const server = http.createServer(async (req, res) => {
+    const chunks = []; for await (const chunk of req) chunks.push(chunk);
+    req.body = JSON.parse(Buffer.concat(chunks).toString()); req.user = { directories: {} };
+    res.status = value => { res.statusCode = value; return res; };
+    res.json = value => res.end(JSON.stringify(value));
+    await handler(req, res);
+  });
+  server.listen(0, "127.0.0.1"); await once(server, "listening");
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const post = async extra => {
+    const response = await fetch(`http://127.0.0.1:${server.address().port}`, { method: "POST",
+      body: JSON.stringify({ ...body, vertex_anti_truncation: "off", vertex_image_input: "current-turn", ...extra }) });
+    assert.equal(response.status, 200);
+    assert.equal(contents(await response.text()), "OK");
+    return [response.headers.get("x-image-input"), response.headers.get("x-image-input-pages")];
+  };
+  // Continue or an assistant-role prefill leaves nothing after the last assistant.
+  assert.deepEqual(await post({ messages: [...body.messages, { role: "assistant", content: "开头" }] }), ["no-text", "0"]);
+  assert.ok(!JSON.stringify(sent.at(-1)).includes("data:image"));
+  assert.deepEqual(await post({}), ["encoded", "1"]);
+  assert.match(JSON.stringify(sent.at(-1)), /data:image\/(png|webp);base64,/);
 });

@@ -49,22 +49,28 @@ export function vertexJsonSchema(schema, rootPath = "/response_format/json_schem
   };
   const converted = visit(schema, rootPath, 0);
   // Resolve local JSON pointers up front. No external schema fetching is permitted.
-  const checkRefs = node => {
+  // The error names the node that holds the unresolved $ref.
+  const checkRefs = (node, path) => {
     if (!isObject(node)) return;
     if (node.$ref) {
       let target = converted;
       for (const part of node.$ref.slice(2).split("/").map(s => s.replace(/~1/g, "/").replace(/~0/g, "~"))) {
-        if (!isObject(target) || !Object.hasOwn(target, part)) throw schemaProblem(rootPath + "/$ref");
+        if (!isObject(target) || !Object.hasOwn(target, part)) throw schemaProblem(path + "/$ref");
         target = target[part];
       }
-      if (!isObject(target)) throw schemaProblem(rootPath + "/$ref");
+      if (!isObject(target)) throw schemaProblem(path + "/$ref");
     }
-    for (const key of ["properties", "$defs"]) for (const child of Object.values(node[key] ?? {})) checkRefs(child);
-    for (const key of ["anyOf", "prefixItems"]) for (const child of node[key] ?? []) checkRefs(child);
-    for (const key of ["items", "additionalProperties"]) if (isObject(node[key])) checkRefs(node[key]);
+    for (const key of ["properties", "$defs"]) for (const [name, child] of Object.entries(node[key] ?? {})) checkRefs(child, path + "/" + key + "/" + pointer(name));
+    for (const key of ["anyOf", "prefixItems"]) for (const [index, child] of (node[key] ?? []).entries()) checkRefs(child, path + "/" + key + "/" + index);
+    for (const key of ["items", "additionalProperties"]) if (isObject(node[key])) checkRefs(node[key], path + "/" + key);
   };
-  checkRefs(converted);
+  checkRefs(converted, rootPath);
   return converted;
+}
+
+// Clients may send the schema itself instead of the {name, schema} wrapper; paths follow what was sent.
+export function responseJsonSchema(format) {
+  return format?.schema != null ? vertexJsonSchema(format.schema) : vertexJsonSchema(format, "/response_format/json_schema");
 }
 
 // Validate exactly the supported assertion subset. Formats remain annotations;
@@ -109,8 +115,7 @@ function matchesVertexSchema(value, schema) {
 export function structuredOutputExpectation(payload) {
   if (payload.response_format?.type === "json_object") return { json: true };
   if (payload.response_format?.type !== "json_schema") return null;
-  const format = payload.response_format.json_schema;
-  return { json: true, schema: vertexJsonSchema(format?.schema ?? format) };
+  return { json: true, schema: responseJsonSchema(payload.response_format.json_schema) };
 }
 
 export function assertStructuredOutput(text, expectation) {

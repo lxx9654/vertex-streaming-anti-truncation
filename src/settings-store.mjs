@@ -16,6 +16,8 @@ export function mergeSettings(current, patch, { connectionOnly = false } = {}) {
   const next = { ...current };
   for (const [key, value] of Object.entries(patch)) {
     if (SECRET_FIELDS.includes(key)) {
+      // Blank keeps the stored secret; null removes it.
+      if (value === null) { next[key] = ""; continue; }
       if (typeof value !== "string" || value.length > 128 * 1024) throw new SettingsError("Invalid credential field");
       if (value.trim()) next[key] = value.trim().replace(/^\uFEFF/, "");
     } else next[key] = value;
@@ -40,13 +42,16 @@ export function createSettingsStore({ directory = process.env.GATEWAY_STATE_DIR 
     try { raw = await readFile(file, "utf8"); }
     catch (error) {
       if (error.code !== "ENOENT") throw new SettingsError("Cannot read saved configuration", 500);
-      return { settings: await settingsFromEnv(env), revision: "new", saved: false };
+      // A bad environment value (for example a system-wide GOOGLE_APPLICATION_CREDENTIALS naming a
+      // missing file) must not lock out the GUI that replaces .env: start from defaults and report it.
+      try { return { settings: await settingsFromEnv(env), revision: "new", saved: false }; }
+      catch (envError) { return { settings: { ...DEFAULT_SETTINGS }, revision: "new", saved: false, envError: envError.message }; }
     }
     try {
       const data = JSON.parse(raw);
       if (data.version !== 1 || !data.settings || Object.keys(data.settings).some(k => !settingNames.has(k))) throw new Error();
       const settings = { ...DEFAULT_SETTINGS, ...data.settings };
-      buildConfig(settings);
+      buildConfig(settings, { requireAscii: false });
       return { settings, revision: revisionOf(raw), saved: true };
     } catch { throw new SettingsError("Saved configuration is invalid; the existing file was preserved", 500); }
   }

@@ -20,18 +20,23 @@ function integer(value, fallback, min, max, name) {
   return number;
 }
 
+// HTTP header values are byte strings, so a key with smart quotes or full-width characters could be
+// saved but never sent. Settings saved before this rule load with requireAscii: false, so the console
+// still opens and reports the problem when the gateway starts.
+const visibleAscii = value => /^[\x21-\x7e]+$/.test(value);
+
 export async function settingsFromEnv(env = process.env) {
   const file = env.GOOGLE_APPLICATION_CREDENTIALS;
-  if ([file, env.VERTEX_ACCESS_TOKEN, env.VERTEX_API_KEY].filter(Boolean).length > 1) throw new Error("Configure exactly one Google authentication method");
+  if ([file, env.VERTEX_ACCESS_TOKEN, env.VERTEX_API_KEY].filter(Boolean).length > 1) throw new Error("Configure exactly one Google authentication method: GOOGLE_APPLICATION_CREDENTIALS, VERTEX_ACCESS_TOKEN or VERTEX_API_KEY");
   let serviceAccountJson = "";
   if (file) {
     try { serviceAccountJson = (await readFile(file, "utf8")).replace(/^\uFEFF/, ""); }
-    catch { throw new Error("Unable to read the Google service-account file"); }
+    catch { throw new Error("Unable to read the Google service-account file (GOOGLE_APPLICATION_CREDENTIALS)"); }
   }
   let geminiPromptRetryText = "";
   if (env.GEMINI_PROMPT_RETRY_TEXT_FILE) {
     try { geminiPromptRetryText = (await readFile(env.GEMINI_PROMPT_RETRY_TEXT_FILE, "utf8")).replace(/^\uFEFF/, ""); }
-    catch { throw new Error("Unable to read the prompt retry text file"); }
+    catch { throw new Error("Unable to read the prompt retry text file (GEMINI_PROMPT_RETRY_TEXT_FILE)"); }
   }
   const toggle = (name, fallback) => {
     if (env[name] == null || env[name] === "") return fallback;
@@ -57,7 +62,7 @@ export async function settingsFromEnv(env = process.env) {
   };
 }
 
-export function buildConnectionConfig(settings) {
+export function buildConnectionConfig(settings, { requireAscii = true } = {}) {
   const s = { ...DEFAULT_SETTINGS, ...settings };
   if (!["service-account", "express", "access-token"].includes(s.authMode)) throw new Error("Invalid authentication mode");
   if (!["standard", "flex", "priority"].includes(s.serviceTier)) throw new Error("Invalid service tier");
@@ -73,8 +78,9 @@ export function buildConnectionConfig(settings) {
     } catch { throw new Error("Service account must contain a valid RSA private key"); }
     accessToken = () => vertexAccessToken(s.serviceAccountJson);
   } else {
-    const value = s.authMode === "express" ? s.apiKey : s.accessToken;
-    if (typeof value !== "string" || !value || /\s/.test(value) || value.length > 8192) throw new Error(s.authMode === "express" ? "Invalid VERTEX_API_KEY" : "Invalid VERTEX_ACCESS_TOKEN");
+    const [name, value] = s.authMode === "express" ? ["VERTEX_API_KEY", s.apiKey] : ["VERTEX_ACCESS_TOKEN", s.accessToken];
+    if (typeof value !== "string" || !value || /\s/.test(value) || value.length > 8192) throw new Error("Invalid " + name);
+    if (requireAscii && !visibleAscii(value)) throw new Error(name + " must contain only visible ASCII characters");
     accessToken = async () => value;
   }
   const host = s.location === "global" ? "aiplatform.googleapis.com" : `${s.location}-aiplatform.googleapis.com`;
@@ -93,12 +99,13 @@ export function buildConnectionConfig(settings) {
   };
 }
 
-export function buildConfig(settings) {
+export function buildConfig(settings, { requireAscii = true } = {}) {
   const s = { ...DEFAULT_SETTINGS, ...settings };
   const key = s.gatewayKey;
   if (typeof key !== "string" || key.length < 16 || key.length > 512 || /\s/.test(key) || /^(change|replace|your)[-_ ]?me/i.test(key)) {
     throw new Error("Set GATEWAY_API_KEY to a random value of at least 16 characters");
   }
+  if (requireAscii && !visibleAscii(key)) throw new Error("GATEWAY_API_KEY must contain only visible ASCII characters");
   if (!["off", "current-turn", "all"].includes(s.imageInput)) throw new Error("Invalid image input mode");
   if (s.unicodeInput && s.imageInput !== "off") throw new Error("Unicode and image input are mutually exclusive");
   if (typeof s.antiTruncation !== "boolean") throw new Error("Invalid anti-truncation setting");
@@ -116,7 +123,7 @@ export function buildConfig(settings) {
   }
   const models = modelProfiles(s.models, s.antiTruncation);
   return {
-    ...buildConnectionConfig(s), gatewayKey: key, models,
+    ...buildConnectionConfig(s, { requireAscii }), gatewayKey: key, models,
     hideUnavailableModels: s.hideUnavailableModels, geminiPrefillToUser: s.geminiPrefillToUser, unicodeInput: s.unicodeInput, imageInput: s.imageInput,
     geminiPromptRetry: { enabled: s.geminiPromptRetryEnabled, text: s.geminiPromptRetryText, ...(matches ? { errorMatches: matches } : {}) },
     // Legacy fields remain available to CLI integrations; profiles own behavior.
@@ -129,6 +136,10 @@ export function buildConfig(settings) {
 }
 
 export async function loadConfig(env = process.env) {
+  // The GUI can start without credentials; the CLI cannot, and an empty service-account JSON would hide why.
+  if (![env.GOOGLE_APPLICATION_CREDENTIALS, env.VERTEX_ACCESS_TOKEN, env.VERTEX_API_KEY].some(Boolean)) {
+    throw new Error("Configure one Google authentication method: GOOGLE_APPLICATION_CREDENTIALS, VERTEX_ACCESS_TOKEN or VERTEX_API_KEY");
+  }
   return buildConfig(await settingsFromEnv(env));
 }
 
