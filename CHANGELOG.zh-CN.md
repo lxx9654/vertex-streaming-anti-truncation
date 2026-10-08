@@ -2,9 +2,9 @@
 
 中文 | [English](CHANGELOG.md)
 
-## 未发布
+## 0.7.0（实验版）
 
-0.6.0 之后的修复与改进，版本号不变。
+0.6.0 之后的修复与改进。酒馆插件保持 0.3.0（标签 `sillytavern-v0.3.0`）。
 
 - **上游错误详情**：上游 HTTP 错误（`upstream_http_error`）以及输出开始前到达的上游错误事件（兼容接口的 `upstream_stream_error`、原生接口的 `native_stream_error`）会在客户端错误中附带 `upstreamError`：Google 的状态码、ErrorInfo 原因码，以及去除标记、邮箱、密钥类字符串、长令牌和本次请求所用凭据后的错误说明，最多 240 个字符。日志和事件列表只保留状态码与原因码。原生接口下，`responseIntegrity.nativeFinishReason` 记录 Google 自己的结束代码，例如 `MALFORMED_FUNCTION_CALL`。
 - **失败原因更明确**：新增错误码 `credential_error`（502：换取访问令牌失败，或密钥/令牌含有无法放进 HTTP 请求头的字符）、`upstream_unreachable`（502：DNS、连接、TLS 或代理失败）和 `image_render_failed`（503：本地图片渲染失败）。`upstream_protocol_error` 现在只表示真正的协议或流错误。上游错误正文损坏或迟迟不结束时，不再掩盖上游状态码和 `Retry-After`：无论是否开启提示词重试，错误正文最多读取约 5 秒。超大请求现在确实收到 `413 request_too_large`；一直没有传完的上传在超时后以 `504 upstream_timeout` 结束。
@@ -15,7 +15,7 @@
 - **控制台**：更多错误显示中文说明。连接测试显示传输方式、失败原因和请求 ID，也不再受 Node 默认 300 秒等待上限的影响。请求日志显示 Unicode 与图片输入结果，传输方式改为可读名称。Express、Flex 或 Priority 强制使用 `global` 后再切回时，恢复之前选择的地区；会话过期时保留未保存的草稿。改进读屏与对比度。
 - **输入转码**：图片页改为无损 WebP，不再使用 PNG：像素完全相同，整页图片更小。长文本换行不再阻塞事件循环数秒，文字也不会超出页面边缘。不可见的格式字符（ZWSP、ZWNJ、WJ、BOM、VS15）不再导致整个请求被拒。全部会话模式下，末尾的 Gemini 3.7/3.8 文本预填充会先改为 user 再渲染。Unicode 输入转码不再替换消息中其他位置的标签或已有 `⟦U:…⟧` 编码块里的匹配内容；这里只认不跨行的完整标签。
 - **SillyTavern 集成**：面板显示图片页数，说明本次没有可转换的文本、以及图片请求仍按非流式交付的情况；图片输入拒绝请求时写明原因。发送图片请求前，前端会确认服务端插件版本一致。超过 8 MiB 的普通抗截断请求改走酒馆原流程。
-- **工具与文档**：CI 增加 macOS、最低支持版本 Node.js 22.9.0 和 15 分钟任务时限。`Start-GUI.cmd` 先检查 Node.js 22.9+。发布检查能发现更多凭据和路径泄露，包括本项目的网关密钥格式。文档补充代理设置（`NODE_USE_ENV_PROXY`）、首次启动从环境变量导入、报告安全漏洞的方式和创世回廊署名。
+- **工具与文档**：CI 增加 macOS、最低支持版本 Node.js 22.9.0 和 15 分钟任务时限。`Start-GUI.cmd` 先检查 Node.js 22.9+。发布检查能发现更多凭据和路径泄露，包括本项目的网关密钥格式。文档补充代理设置（`NODE_USE_ENV_PROXY`）、首次启动从环境变量导入、报告安全漏洞的方式和 Unicode 编码规则作者灰鸠「GoldRush」的署名。
 - 本次改动只经过本地测试和模拟上游检查，尚未做真实 Google、代理、浏览器或 SillyTavern 验证，详见[验收说明](docs/VALIDATION.md)。
 
 ## 0.6.0（实验版）/ SillyTavern 集成 0.3.0

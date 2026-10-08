@@ -2,9 +2,9 @@
 
 [中文](CHANGELOG.zh-CN.md) | English
 
-## Unreleased
+## 0.7.0 (experimental)
 
-Fixes and refinements after 0.6.0. Version numbers are unchanged.
+Fixes and refinements after 0.6.0. The SillyTavern plugin stays at 0.3.0 (tag `sillytavern-v0.3.0`).
 
 - **Provider error details.** Provider HTTP errors (`upstream_http_error`) and provider error events that arrive before any output (`upstream_stream_error` from the compatible endpoint, `native_stream_error`) now include `upstreamError` in the client error: Google's status, its ErrorInfo reason and the error message with markup, email addresses, key-like strings, long tokens and the request's own credential removed, capped at 240 characters. Logs and the event list keep only the status and reason. On native routes, `responseIntegrity.nativeFinishReason` records Google's own finish code, such as `MALFORMED_FUNCTION_CALL`.
 - **Clearer failures.** New error codes: `credential_error` (502: the token exchange failed, or the key or token contains characters that cannot be sent in an HTTP header), `upstream_unreachable` (502: DNS, connection, TLS or proxy failure) and `image_render_failed` (503: local rendering failure). `upstream_protocol_error` now means only a genuine protocol or stream violation. A broken or stalled error body no longer hides the provider status or `Retry-After`: the error body is read for at most about 5 seconds, with or without prompt retry. An oversized request now actually receives `413 request_too_large`; an upload that never finishes ends with `504 upstream_timeout` at the deadline.
@@ -15,7 +15,7 @@ Fixes and refinements after 0.6.0. Version numbers are unchanged.
 - **Console.** Chinese messages for more errors. The connection test shows the transport, the failure cause and the request ID, and no longer stops at Node's default 300-second wait. The request log shows Unicode and image-input results and readable transport labels. The region chosen before Express, Flex or Priority forced `global` comes back, and an unsaved draft survives a session expiry. Screen-reader and contrast fixes.
 - **Input encoding.** Image pages are now lossless WebP instead of PNG: the pixels are identical and full pages are smaller. Line wrapping no longer blocks the event loop for seconds on long text, and text never runs past the page edge. Invisible format characters (ZWSP, ZWNJ, WJ, BOM, VS15) no longer reject a request. In `all` mode a trailing Gemini 3.7/3.8 text prefill becomes a user turn before rendering. Unicode input leaves matches inside tags or existing `⟦U:…⟧` blocks elsewhere in a message unchanged; only complete one-line tags in the surrounding text count for this.
 - **SillyTavern integration.** The panel shows the image page count, says when nothing was converted and when an image request is still delivered without streaming, and names the cause when image input refuses a request. Before an image request, the frontend checks that the server plugin's version matches. Plain anti-truncation requests over 8 MiB use Tavern's own route.
-- **Tooling and docs.** CI adds macOS, the minimum supported Node.js 22.9.0 and a 15-minute job limit. `Start-GUI.cmd` checks for Node.js 22.9+ first. The release check detects more credential and path leaks, including this package's gateway-key format. The docs add proxy setup (`NODE_USE_ENV_PROXY`), first-run import from the environment, how to report a security problem and the Genesis Corridor credit.
+- **Tooling and docs.** CI adds macOS, the minimum supported Node.js 22.9.0 and a 15-minute job limit. `Start-GUI.cmd` checks for Node.js 22.9+ first. The release check detects more credential and path leaks, including this package's gateway-key format. The docs add proxy setup (`NODE_USE_ENV_PROXY`), first-run import from the environment, how to report a security problem and the credit to 灰鸠「GoldRush」 for the Unicode encoding rules.
 - Checked with local tests and simulated upstreams only; no live Google, proxy, browser or SillyTavern check has been made for these changes yet. See [validation](docs/VALIDATION.en.md).
 
 ## 0.6.0 (experimental) / SillyTavern integration 0.3.0

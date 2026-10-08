@@ -18,6 +18,6 @@ SillyTavern 服务端插件在酒馆进程内运行，权限与酒馆相同。�
 
 ## 报告安全漏洞
 
-报告安全问题时，请开一个只请求私下联系方式、不含任何问题细节的公开 Issue。凭据、认证或数据泄露类问题的细节不要写进公开 Issue，也不要附上真实密钥或令牌。本仓库启用 GitHub 私密漏洞报告后，也可以改用 Security 页签下的 [Report a vulnerability](https://github.com/ken050210/vertex-streaming-anti-truncation/security/advisories/new) 页面私下报告。
+请通过仓库 Security 页签下的 [Report a vulnerability](https://github.com/ken050210/vertex-streaming-anti-truncation/security/advisories/new) 页面私下报告安全问题。凭据、认证或数据泄露类问题的细节不要写进公开 Issue，也不要附上真实密钥或令牌。私密表单不可用时，可以开一个只请求私下联系方式、不含任何问题细节的公开 Issue。
 
 报告其他问题时，可以附上版本、状态码、`requestId` 和 `antiTruncation` 元数据。请勿附上 `.env`、服务账号文件、bearer token 或私人对话。

@@ -18,6 +18,6 @@ The SillyTavern server plugin runs inside the Tavern process with SillyTavern's 
 
 ## Reporting a vulnerability
 
-To report a security problem, open a public issue that only asks for a private contact and contains no details of the problem. Never put credential, authentication or data-exposure details in a public issue, and never attach real keys or tokens. Once GitHub private vulnerability reporting is enabled for this repository, you can instead report privately through the [Report a vulnerability](https://github.com/ken050210/vertex-streaming-anti-truncation/security/advisories/new) page under the Security tab.
+Report security problems privately through the [Report a vulnerability](https://github.com/ken050210/vertex-streaming-anti-truncation/security/advisories/new) page under the repository's Security tab. Never put credential, authentication or data-exposure details in a public issue, and never attach real keys or tokens. If the private form is unavailable, open a public issue that only asks for a private contact and contains no details of the problem.
 
 For other bug reports, include the version, status code, `requestId` and `antiTruncation` metadata. Omit `.env`, service-account files, bearer tokens and private conversation text.

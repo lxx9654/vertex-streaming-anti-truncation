@@ -16,7 +16,7 @@ The synthetic text-tool transport design comes from [Antigravity-gateway](https:
 
 ## Console preview
 
-These screenshots use demo configuration and a simulated upstream, showing the Chinese-language console in light and dark themes. The ports shown are demo ports; the defaults are `4780` for the console and `4781` for the API. The screenshots predate the connection page's "SillyTavern 兼容与重试" panel (image input, Unicode, prefill and retry).
+These screenshots use demo configuration and a simulated upstream, showing the Chinese-language console in light and dark themes. The ports shown are demo ports; the defaults are `4780` for the console and `4781` for the API. The screenshots show version 0.7.0.
 
 **Overview**: gateway status, client connection details, saved model profiles and recent requests.
 
@@ -254,7 +254,7 @@ The default tests use local fixtures, require no real credentials and incur no i
 
 ## Unicode input
 
-The gateway's **Unicode input (all models)** setting is a separate, default-off global toggle (`UNICODE_INPUT=true|false`). Save/apply affects subsequent requests across normal, buffered and streaming modes. Enabled clients must supply `router_unicode_input: {user_floor: "latest actual user chat floor"}`. Missing source fails locally with 400; an expanded body exceeding the size limit fails with 413. The local field is stripped even when disabled. The encoding rules and current-floor matching follow the Genesis Corridor (创世回廊) v0.7.2 preset and are included with its author's permission; see [NOTICE](NOTICE.md).
+The gateway's **Unicode input (all models)** setting is a separate, default-off global toggle (`UNICODE_INPUT=true|false`). Save/apply affects subsequent requests across normal, buffered and streaming modes. Enabled clients must supply `router_unicode_input: {user_floor: "latest actual user chat floor"}`. Missing source fails locally with 400; an expanded body exceeding the size limit fails with 413. The local field is stripped even when disabled. The encoding rules and current-floor matching follow an encoder by 灰鸠「GoldRush」 (the author's online name) and are included with the author's permission; see [NOTICE](NOTICE.md).
 
 Only matching message text is encoded; unmatched input remains unchanged. Han characters and ASCII letters become `⟦U:…⟧`; tags, existing encoded blocks, digits, punctuation and emoji are kept, but letters inside `{{user}}` are not protected. Matches inside tags or existing `⟦U:…⟧` blocks elsewhere in a message are left unchanged (a deliberate difference from the reference); for this check, only a complete one-line tag such as `<剧情>` counts, so a stray `<` elsewhere in the message (for example `<3`) does not protect anything. Encoding of the floor itself keeps every `<…>` span, as the reference does. The three forms of the floor (original, trimmed and newline-normalized) are matched in one pass, longest first, and inserted blocks are never matched again. There is no serialized-JSON fallback: model IDs, tool names, schemas and media URLs remain intact. Tools/schema bypass does not disable input encoding. Response header `x-unicode-input` and fixed metadata/counts describe the result without logging prompt text.
 

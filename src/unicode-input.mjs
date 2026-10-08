@@ -1,4 +1,4 @@
-// Compact Unicode and current-floor matching follow Genesis Corridor v0.7.2.
+// Compact Unicode and current-floor matching follow the encoder by 灰鸠「GoldRush」 (see NOTICE.md).
 // Match message text only: never substitute serialized protocol fields.
 // The client supplies the actual chat floor; assembled messages are not a chat store.
 const reasons = new Set(["encoded", "floor-not-found", "no-encodable-text"]);
