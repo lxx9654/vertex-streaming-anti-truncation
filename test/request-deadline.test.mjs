@@ -77,14 +77,16 @@ test("gateway deadline returns before pending authentication and never starts in
   assert.equal(f.fetchCalls(), 0);
 });
 
-test("unfinished uploads reach their deadline or byte limit without waiting for EOF", { timeout: 2000 }, async t => {
+test("unfinished uploads, oversized or not, reach their deadline without waiting for EOF", { timeout: 2000 }, async t => {
+  // An oversized upload is drained (so a finished one reads its 413), never held past the deadline.
   for (const oversized of [false, true]) {
     const f = await gateway(t, () => assert.fail("upload must not authenticate"), { bodyLimitBytes: oversized ? 8 : 10000 });
     const request = f.request();
     const response = jsonResponse(request);
     request.write(oversized ? "x".repeat(16) : "{");
     const result = await response;
-    assert.equal(result.status, oversized ? 413 : 504);
+    assert.equal(result.status, 504);
+    assert.equal(result.body.error.code, "upstream_timeout");
     assert.equal(result.headers.connection, "close");
     assert.equal(f.server.gatewayStats().active, 0);
     assert.equal(f.fetchCalls(), 0);

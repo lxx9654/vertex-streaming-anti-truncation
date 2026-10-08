@@ -42,6 +42,22 @@ test("original, trimmed and normalized newline forms follow reference order", ()
   assert.deepEqual(result.payload.messages.map(m => m.content), parts.map(s => encodeUnicodeText(s).text));
 });
 
+test("matches inside surrounding tags or encoded blocks stay intact and replacements are never matched again", () => {
+  const tags = prepare({ messages: [{ role: "system", content: "<剧情>上文剧情</剧情>" }, { role: "user", content: "剧情" }],
+    router_unicode_input: { user_floor: "剧情" } });
+  assert.deepEqual(tags.payload.messages.map(m => m.content), ["<剧情>上文⟦U:5267 60C5⟧</剧情>", "⟦U:5267 60C5⟧"]);
+  assert.equal(tags.metadata.occurrences, 2);
+  const block = prepare({ messages: [{ role: "assistant", content: "⟦U:4E2D 6587⟧ D" }], router_unicode_input: { user_floor: "D" } });
+  assert.equal(block.payload.messages[0].content, "⟦U:4E2D 6587⟧ ⟦U:44⟧");
+  const trimmed = prepare({ messages: [{ role: "user", content: "say U" }], router_unicode_input: { user_floor: " U" } });
+  assert.equal(trimmed.payload.messages[0].content, "say ⟦U:55⟧");
+  assert.deepEqual([trimmed.metadata.occurrences, trimmed.metadata.encodedCharacters], [1, 1]);
+  const stray = prepare({ messages: [{ role: "system", content: "<history>\nUser: I <3 cats\nBot: meow\nUser: 你好呀\n</history>" },
+    { role: "user", content: "你好呀" }], router_unicode_input: { user_floor: "你好呀" } });
+  assert.equal(stray.payload.messages[0].content, "<history>\nUser: I <3 cats\nBot: meow\nUser: ⟦U:4F60 597D 5440⟧\n</history>");
+  assert.equal(stray.metadata.occurrences, 2);
+});
+
 test("string parts and text parts match while images and tool/schema definitions are preserved", () => {
   const image = { type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } };
   const tools = [{ type: "function", function: { name: "test", parameters: { type: "object" } } }];

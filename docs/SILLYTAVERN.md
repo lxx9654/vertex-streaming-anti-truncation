@@ -16,7 +16,7 @@
 https://github.com/ken050210/vertex-streaming-anti-truncation
 ```
 
-分支或标签框**留空**即可跟随仓库默认分支更新；需要固定本次版本时，填写 `sillytavern-v0.1.0`。按需选择“只给我安装”或“给所有人安装”。
+分支或标签框**留空**，跟随仓库默认分支；第 2 步的服务端插件同样从默认分支安装，两端版本一致。不要在这里填写旧标签 `sillytavern-v0.1.0`：服务端仍是默认分支的新版本，版本检查会失败，面板提示“服务端插件未就绪或版本不匹配”。按需选择“只给我安装”或“给所有人安装”。
 
 ### 2. 安装服务端插件（首次必需）
 
@@ -26,19 +26,26 @@ https://github.com/ken050210/vertex-streaming-anti-truncation
 node plugins.js install https://github.com/ken050210/vertex-streaming-anti-truncation
 ```
 
-该命令克隆仓库到 `plugins/vertex-streaming-anti-truncation`。确认酒馆 `config.yaml` 中 `enableServerPlugins: true`，然后重启酒馆并刷新网页。
+该命令克隆仓库到 `plugins/vertex-streaming-anti-truncation`。接着在 SillyTavern 根目录运行以下命令，安装图片输入所需的渲染依赖：
 
-截图中的“安装扩展”窗口只安装浏览器端文件，不能替代这一步。只安装前端时，面板会显示服务端插件未就绪；不要启用抗截断，先完成服务端安装。
+```sh
+cd plugins/vertex-streaming-anti-truncation
+npm ci --ignore-scripts
+```
+
+跳过这一步时抗截断和 Unicode 转码仍可使用，但选择图片输入会返回 `image_renderer_unavailable`（HTTP 503）；补装后需重启酒馆。确认酒馆 `config.yaml` 中 `enableServerPlugins: true`，然后重启酒馆并刷新网页。
+
+酒馆的“安装扩展”窗口只安装浏览器端文件，不能替代这一步。只安装前端时，面板会显示服务端插件未就绪；不要启用抗截断，先完成服务端安装。
 
 ### 3. 确认安装
 
-进入 **API 连接 → Google Vertex AI → 抗截断传输**，点击“检查插件连接”，应显示“服务端插件已就绪”。此检查不访问 Google、不调用模型。
+进入 **API 连接 → Google Vertex AI → 抗截断传输**，点击“检查插件连接”，应显示“服务端插件已就绪”。此检查不访问 Google、不调用模型，也不检查图片渲染依赖是否已安装。
 
 默认关闭。选择流式抗截断时，还需开启酒馆原有的流式传输选项。
 
 ### 更新与已有手动安装
 
-- 前端使用酒馆扩展管理器更新；服务端可在其仓库目录运行 `git pull --ff-only`，然后重启酒馆。两端应使用同一版本。
+- 前端使用酒馆扩展管理器更新；服务端在其仓库目录依次运行 `git pull --ff-only` 和 `npm ci --ignore-scripts`，然后重启酒馆。两端应使用同一版本。
 - 不要把相同扩展重复安装到“当前用户”和“所有用户”。
 - 如果已经使用 ZIP 手动安装到 `vertex-anti-truncation`，无需再装一份。需要迁移为 Git 管理时，先关闭抗截断、停用旧 UI 扩展，并把旧前后端目录备份移到各自加载目录之外，再按上述步骤安装。保留酒馆凭据和设置。
 
@@ -58,11 +65,13 @@ npm run package:sillytavern
 | `dist/sillytavern/server/vertex-anti-truncation` | `plugins/vertex-anti-truncation` |
 | `dist/sillytavern/extension/vertex-anti-truncation` | `public/scripts/extensions/third-party/vertex-anti-truncation` |
 
-也可以从 [GitHub Release](https://github.com/ken050210/vertex-streaming-anti-truncation/releases/tag/sillytavern-v0.1.0) 下载配套 ZIP，按上表安装。服务端需启用 `enableServerPlugins: true`，然后重启酒馆、刷新网页。
+复制后在 `plugins/vertex-anti-truncation` 目录运行 `npm ci --ignore-scripts` 安装图片渲染依赖。服务端需启用 `enableServerPlugins: true`，然后重启酒馆、刷新网页。
+
+[GitHub Release `sillytavern-v0.1.0`](https://github.com/ken050210/vertex-streaming-anti-truncation/releases/tag/sillytavern-v0.1.0) 中的 ZIP 是旧版 0.1.0：前后端版本一致，但不含 Unicode 与图片输入。当前版本尚未发布 Release，请使用上方 Git 安装或本地打包。
 
 ## 使用
 
-抗截断与 Unicode 转码默认都关闭，不会更改现有连接。抗截断模式选择：
+抗截断与输入转码默认都关闭，不会更改现有连接。抗截断模式选择：
 
 - **关闭（普通 Vertex）**：使用酒馆原有请求。
 - **非流式抗截断**：一个上游请求，等待完整正文再交付。酒馆开启流式时，也只在完成后一次交付。
@@ -73,7 +82,8 @@ Express、Flex、Priority 需要将地区设为 `global`。完整服务账号的
 ## 范围与边界
 
 - 不修改酒馆核心文件。前端仅重定向同源 `/api/backends/chat-completions/generate` 中符合条件的 Vertex POST 请求；其他来源和关闭状态保持原路由。
-- 现有工具、工具历史、JSON/Schema、多个候选、联网搜索、图片生成、非 Gemini 模型和反向代理请求走酒馆原流程。面板会显示本次跳过原因。
+- 现有工具、工具历史、JSON/Schema、多个候选、联网搜索、图片生成、非 Gemini 模型、反向代理请求，以及超过 8 MiB 的抗截断请求走酒馆原流程。抗截断开启时，面板会显示本次跳过原因。
+- 抗截断会在提示词末尾追加一条传输格式的 user 指令。最后一条为 assistant 的请求（开启 Continue prefill 后点击“继续”，或以末尾 assistant 提示词作预填充的预设）不再作为模型回合续写，模型可能从头输出或重复已有开头。依赖预填充续写时可关闭抗截断；Gemini 3.7/3.8 Flash 官方不允许对话以 model 结尾，关闭后同样不保证续写。
 - 保留酒馆的提示词后处理、角色名称、系统提示词、媒体转换、停止串、采样与思考设置；使用本项目已有的模型参数兼容规则。
 - 使用本项目的工具正文还原和回复完整性检查。不会把缺少结束标记、空回复或损坏的工具参数当成成功；保留长度限制及过滤结果。
 - 不自动续写、不自动重试，不增加第二轮模型请求。抗截断传输增加少量提示词和工具格式开销，不能保证模型永不中断，也不能绕过输出上限或模型限制。
@@ -92,18 +102,28 @@ Express、Flex、Priority 需要将地区设为 `global`。完整服务账号的
 
 接口参考：[UI Extensions](https://docs.sillytavern.app/for-contributors/writing-extensions/)、[Server Plugins](https://docs.sillytavern.app/for-contributors/server-plugins/)。
 
-## 独立 Unicode 输入开关（v0.2.0）
+## 输入转码
 
-Vertex 面板新增 **Unicode 输入转码（所有 Vertex 模式）**，默认关闭，与“抗截断传输”分别保存。前端从当前聊天读取最新真实用户楼层，只转换请求消息中匹配的文本，不修改聊天、预设、工具定义、Schema 或图片地址。开关开启时，即使抗截断关闭，或因工具／Schema／搜索等原因走酒馆原路由，输入转码仍会执行；非 Vertex 请求不处理。
+Vertex 面板的 **输入转码** 下拉框有四档：关闭、Unicode、图片·当前轮、图片·全部会话，每项附有转换范围，默认关闭。Unicode 与图片只能选一种，切换时自动保持互斥，沿用原有设置字段并保留已保存的选择。输入转码独立于“抗截断传输”，两者分别保存。更改选择立即影响之后的请求，已发出的请求不变；非 Vertex 请求不处理。
+
+### Unicode
+
+选择 Unicode 后，前端从当前聊天读取最新真实用户楼层，只转换请求消息中匹配的文本，不修改聊天、预设、工具定义、Schema 或图片地址。即使抗截断关闭，或因工具／Schema／搜索等原因走酒馆原路由，输入转码仍会执行。
 
 没有真实楼层时停止发送并提示；原文未匹配时显示提示并按原文发送，不猜测拼装请求中最后一条 user。编码后请求超过 8 MiB 则停止发送。已有 Unicode 编码不会被再次编码；请关闭预设中的同类功能，避免原文匹配失效。不会追加解码指令，也不承诺模型理解质量或 token 用量下降。
 
-转码在浏览器中、抗截断分流之前执行；普通／旁路请求仍由酒馆原后端处理。服务端插件继续只处理原有的纯文本抗截断路径。启用或关闭立即影响之后的请求，已发出的请求不变。
+Unicode 转码在浏览器中、抗截断分流之前执行；普通／旁路请求仍由酒馆原后端处理，服务端插件不参与 Unicode 转码。
 
-当前源码配套包为 v0.2.0，应同时更新前后端以保持版本检查一致；本文上方 v0.1.0 标签／Release 链接仅提供旧版，不包含本次新增功能。本次未发布新标签；已在本机同时更新前后端并重启，完成开关持久化及三种模式的短请求验收。验收后恢复关闭状态，详见 [验收记录](UNICODE-INPUT-AUDIT.md)。
+### 图片
 
-## 图片输入（UI 0.3.0）
+图片由服务端插件渲染为无损 WebP 页面。当前轮／全部会话规则与独立网关一致，系统指令保留文字。“图片·当前轮”只转换最后一条 AI 消息之后的文本；之后没有可转换文本时（例如开启 Continue prefill 后点击“继续”，或预设以 AI 消息结尾作预填充），本次按原文发送。图片输入请求一律按非流式交付，即使抗截断关闭、酒馆开启了流式也是如此；没有可转换文本时面板会说明本次按原文发送，若酒馆开启了流式且未选择非流式抗截断，还会提示仍按非流式交付。成功转换时面板显示页数。
 
-面板使用一个“输入转码”下拉框：关闭、Unicode、图片·当前轮、图片·全部会话，每项附有转换范围。选择时自动保持 Unicode 与图片互斥，沿用原有设置字段并保留已保存选择。输入转码独立于抗截断开关；当前轮/全部会话规则与独立网关一致，系统指令保留文字。图片请求以缓冲响应交付，包括选择流式时；工具、Schema、搜索及其他原有不兼容请求启用图片后会明确报错，不会改回明文。
+发送图片请求前，前端会确认服务端插件版本一致；未就绪或版本不匹配时停止发送，不会改用明文。请求含图片输入不支持的内容时停止发送，面板会写明原因（如已有工具调用、此模型不适用、反向代理）。转换前请求本身超过 8 MiB 返回 413 `request_too_large`；含 emoji、控制字符或字体缺字时返回 400 `image_input_unsupported_characters`（“全部会话”会检查整段历史）；渲染失败返回 503 `image_render_failed`。面板会用中文说明这些错误。零宽空格等不可见格式字符（ZWSP、ZWNJ、WJ、BOM、VS15）不影响发送。
 
-服务端首次安装或更新后，在服务端插件目录运行 `npm ci --ignore-scripts` 安装 PNG 渲染依赖，再重启酒馆。手动打包也需要这一步；字体及许可证随服务端包提供。前端扩展目录不需要 npm 安装。实际酒馆导入及持久化仍需在目标安装中验证。
+图片经 base64 后连同请求中其余内容合计不得超过 8 MiB（仅有图片时约 6 MiB，中文约 2.4–4.5 万字、约 20–28 页，视内容和换行而定；保留为文字的系统指令和角色卡，以及当前轮模式下的此前历史，也占用这一额度），超出返回 413 `image_input_too_large`。每条含文字的消息（每个文本片段）至少单独占一页，每次请求最多 100 页，因此“全部会话”最多约 100 条这样的消息；长聊天请改用“图片·当前轮”。
+
+服务端首次安装或更新后，在服务端插件目录运行 `npm ci --ignore-scripts` 安装图片渲染依赖，再重启酒馆。手动打包也需要这一步；字体及许可证随服务端包提供。前端扩展目录不需要 npm 安装。
+
+### 版本与验收
+
+当前源码中前端与服务端均为 0.3.0，请同时更新前后端，以免版本检查失败；上方 v0.1.0 标签／Release 只提供旧版，不含 Unicode 与图片输入。0.3.0 对应标签 `sillytavern-v0.3.0`（与网关 `v0.7.0` 为同一提交），前后端都从该标签安装即可固定版本；0.2.0 未发布标签。Unicode 转码在 v0.2.0（当时为独立勾选框）时完成的短请求验收见[验收记录](UNICODE-INPUT-AUDIT.md)（英文）；0.3.0 下拉框和图片输入在实际酒馆中的导入与持久化尚未验证。

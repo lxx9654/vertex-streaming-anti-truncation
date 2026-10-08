@@ -1,4 +1,4 @@
-import { isObject, sseData, trafficType, transformSse } from "./wire.mjs";
+import { isObject, protocolError, sseData, trafficType, transformSse } from "./wire.mjs";
 
 // A buffered profile uses one non-streaming upstream request. When the client
 // expects SSE, send the completed reply as SSE without pretending it was live.
@@ -23,7 +23,7 @@ export function aliasStream(response, model, onMetadata = () => {}) {
     if (done) throw new Error("Upstream stream continued after DONE");
     if (data.trim() === "[DONE]") { done = true; onMetadata({ streamDone: true }); return emit(raw + "\n\n"); }
     const parsed = JSON.parse(data);
-    if (!isObject(parsed) || parsed.error || event === "error") throw new Error("Invalid upstream stream event");
+    if (!isObject(parsed) || parsed.error || event === "error") throw Object.assign(protocolError("upstream_stream_error"), { upstreamBody: parsed });
     if (parsed.model != null) parsed.model = model;
     const tier = trafficType(parsed.usage);
     if (tier) onMetadata({ trafficType: tier });

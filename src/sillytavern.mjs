@@ -6,9 +6,8 @@ import { inspectCompletion, guardCompletionStream } from "./completion-integrity
 import { completionStream } from "./completion-stream.mjs";
 import { documentedUnsupported } from "./unsupported-params.mjs";
 import { protocolError, sseData, transformSse } from "./wire.mjs";
-import { bypassReason } from "../integrations/sillytavern/shared.js";
+import { bypassReason, BODY_LIMIT } from "../integrations/sillytavern/shared.js";
 
-export const BODY_LIMIT = 8 * 1024 * 1024;
 export const requestError = code => Object.assign(new Error(code), { status: 400, code });
 
 // Reuse ST's own prompt/name/media and thinking conversion. Nothing in the

@@ -4,7 +4,7 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import { once } from "node:events";
 import { buildConfig, buildConnectionConfig, publicSettings } from "./config.mjs";
 import { createSettingsStore, mergeSettings, SettingsError } from "./settings-store.mjs";
-import { createGatewayServer } from "./gateway.mjs";
+import { createGatewayServer, upstreamDispatcher } from "./gateway.mjs";
 import { discoverModels } from "./model-discovery.mjs";
 
 const assets = new Map([["/", ["index.html", "text/html"]], ["/app.css", ["app.css", "text/css"]], ["/app.js", ["app.js", "text/javascript"]], ["/favicon.svg", ["favicon.svg", "image/svg+xml"]]]);
@@ -34,16 +34,18 @@ async function whileConnected(res, run) {
   res.once("close", abort);
   try { return await run(client.signal); } finally { res.off("close", abort); }
 }
+const AUTH_CREDENTIALS = [["service-account", "serviceAccountJson"], ["express", "apiKey"], ["access-token", "accessToken"]];
 
 export async function createConsole({ store = createSettingsStore(), fetchImpl = fetch, logger = () => {}, autoStart = true } = {}) {
   let saved = await store.load();
-  let activeConfig, gateway, gatewayRef, runtimeError = null, busy = false;
+  let activeConfig, gateway, gatewayRef, runtimeError = saved.envError ? "Environment settings were ignored: " + saved.envError : null, busy = false;
   const retired = new Set(), events = [], sessions = new Map();
   const bootstrapToken = saved.settings.gatewayKey ? null : randomBytes(32).toString("hex");
   let failures = 0, blockedUntil = 0;
   const startedAt = Date.now();
   const log = event => { events.unshift(event); if (events.length > 200) events.pop(); logger(event); };
   const makeGateway = config => createGatewayServer(config, { fetchImpl, logger: log });
+  const assertSeparatePorts = config => { if (server.address()?.port === config.port) throw new SettingsError("Gateway and console must use different ports"); };
   const activeRequests = () => (gateway?.gatewayStats().active || 0) + [...retired].reduce((n, s) => n + s.gatewayStats().active, 0);
   function status() {
     return { running: Boolean(gateway?.listening), activeRequests: activeRequests(), error: runtimeError,
@@ -58,7 +60,7 @@ export async function createConsole({ store = createSettingsStore(), fetchImpl =
   }
   async function start(config = buildConfig(saved.settings)) {
     if (gateway?.listening) return;
-    if (server.address()?.port === config.port) throw new SettingsError("Gateway and console must use different ports");
+    assertSeparatePorts(config);
     const ref = { current: config };
     const candidate = makeGateway(() => ref.current);
     await listen(candidate, config.port);
@@ -72,8 +74,12 @@ export async function createConsole({ store = createSettingsStore(), fetchImpl =
     const latest = await store.load();
     if (body.revision !== latest.revision) throw new SettingsError("Configuration changed; reload before saving", 409);
     const next = mergeSettings(latest.settings, body.settings);
+    // The first save starts from environment values, which can hold another mode's credential
+    // (for example a system-wide GOOGLE_APPLICATION_CREDENTIALS). Keep only the selected mode's
+    // credential unless this save entered the other one.
+    if (!latest.saved) for (const [mode, name] of AUTH_CREDENTIALS) if (next.authMode !== mode && next[name] === latest.settings[name]) next[name] = "";
     const config = buildConfig(next);
-    if (server.address()?.port === config.port) throw new SettingsError("Gateway and console must use different ports");
+    assertSeparatePorts(config);
     // Bind the replacement first. A port conflict or failed disk write leaves the
     // original listener/configuration intact. Existing streams drain on their snapshot.
     let candidate;
@@ -86,10 +92,28 @@ export async function createConsole({ store = createSettingsStore(), fetchImpl =
     catch (error) { candidate?.closeAllConnections(); await close(candidate); throw error; }
     if (candidate) {
       const old = gateway; gateway = candidate; gatewayRef = ref;
-      if (old) { retired.add(old); old.close(() => retired.delete(old)); old.closeIdleConnections(); }
+      if (old) {
+        retired.add(old);
+        // A keep-alive socket that was busy at the switch could otherwise carry later requests to
+        // this listener with the old key, credentials and tier. Running requests keep their
+        // handler; later ones are refused and their connection closes. The upload is read first:
+        // replying mid-upload resets the connection instead of delivering the error. close() stops
+        // Node's request timeout, so an upload that never finishes gets its own limit.
+        old.removeAllListeners("request");
+        old.on("request", (oldReq, oldRes) => {
+          oldRes.shouldKeepAlive = false;
+          const timer = setTimeout(() => oldRes.destroy(), 10000); timer.unref();
+          oldReq.resume().once("end", () => {
+            clearTimeout(timer);
+            json(oldRes, 503, { error: { code: "gateway_port_changed", message: "gateway_port_changed", type: "gateway_error" } });
+          });
+        });
+        old.close(() => retired.delete(old)); old.closeIdleConnections();
+      }
     } else gatewayRef.current = config;
     activeConfig = config; runtimeError = null;
-    for (const id of sessions.keys()) if (id !== sessionId) sessions.delete(id);
+    // Only a new gateway key ends other sign-ins; ordinary edits keep them.
+    if (next.gatewayKey !== latest.settings.gatewayKey) for (const id of sessions.keys()) if (id !== sessionId) sessions.delete(id);
   }
   const server = http.createServer(async (req, res) => {
     res.setHeader("cache-control", "no-store");
@@ -164,12 +188,21 @@ export async function createConsole({ store = createSettingsStore(), fetchImpl =
         const model = body.model ?? activeConfig.models[0]?.id;
         if (!activeConfig.models.some(m => m.id === model)) throw new SettingsError("Select a saved model before testing");
         return await whileConnected(res, async signal => {
-          const upstream = await fetch(`http://127.0.0.1:${activeConfig.port}/v1/chat/completions`, {
-            method: "POST", signal,
-            headers: { authorization: "Bearer " + activeConfig.gatewayKey, "content-type": "application/json" },
-            body: JSON.stringify({ model, router_unicode_input: { user_floor: "Write three short lines about a river." }, messages: [{ role: "user", content: "Write three short lines about a river." }], max_tokens: 512, stream: body.stream === true,
-              ...(body.stream === true ? { stream_options: { include_usage: true } } : {}) }),
-          });
+          let upstream;
+          try {
+            upstream = await fetch(`http://127.0.0.1:${activeConfig.port}/v1/chat/completions`, {
+              method: "POST", signal,
+              // The gateway answers by its own upstream timeout; fetch's built-in 300 s limit must not cut a slower probe first.
+              dispatcher: await upstreamDispatcher(activeConfig.timeoutMs + 30000),
+              headers: { authorization: "Bearer " + activeConfig.gatewayKey, "content-type": "application/json" },
+              body: JSON.stringify({ model, router_unicode_input: { user_floor: "Write three short lines about a river." }, messages: [{ role: "user", content: "Write three short lines about a river." }], max_tokens: 512, stream: body.stream === true,
+                ...(body.stream === true ? { stream_options: { include_usage: true } } : {}) }),
+            });
+          } catch (error) {
+            if (signal.aborted) throw error;
+            throw error.cause?.code === "UND_ERR_HEADERS_TIMEOUT" ? new SettingsError("The gateway did not respond in time", 504)
+              : new SettingsError("Cannot reach the local gateway", 502);
+          }
           res.writeHead(upstream.status, { "content-type": upstream.headers.get("content-type"),
             "x-request-id": upstream.headers.get("x-request-id"), "x-anti-truncation-transport": upstream.headers.get("x-anti-truncation-transport") || "unknown" });
           for await (const bytes of upstream.body) if (!res.write(Buffer.from(bytes))) await once(res, "drain", { signal });
@@ -181,8 +214,12 @@ export async function createConsole({ store = createSettingsStore(), fetchImpl =
       busy = true;
       try {
         if (path === "/api/config") await apply(body, sessionId);
-        if (path === "/api/validate") { mergeSettings((await store.load()).settings, body.settings); return json(res, 200, { valid: true }); }
-        if (path === "/api/start") { saved = await store.load(); await start(); }
+        if (path === "/api/validate") { assertSeparatePorts(buildConfig(mergeSettings((await store.load()).settings, body.settings))); return json(res, 200, { valid: true }); }
+        if (path === "/api/start") {
+          saved = await store.load();
+          // Like autostart, keep the reason in status so the overview does not show an older one.
+          try { await start(); } catch (error) { runtimeError = error.message; throw error; }
+        }
         if (path === "/api/stop") await stop();
         return json(res, 200, { settings: publicSettings(saved.settings), revision: saved.revision, saved: saved.saved, status: status() });
       } finally { busy = false; }
@@ -195,7 +232,8 @@ export async function createConsole({ store = createSettingsStore(), fetchImpl =
   return {
     server, bootstrapToken, status,
     async listen(port = 4780) {
-      await listen(server, port);
+      try { await listen(server, port); }
+      catch { throw new SettingsError(`Console port ${port} is unavailable (GUI_PORT); another console may already be running`, 409); }
       if (autoStart && saved.settings.gatewayKey) {
         try { await start(); } catch (error) { runtimeError = error.message; }
       }

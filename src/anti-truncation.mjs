@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { supportsNativeTextStream } from "./vertex-native.mjs";
 // Restoration failures describe one reply, not the connection, and keep their code.
-import { isObject, protocolError as failure, sseData, trafficType, transformSse } from "./wire.mjs";
+import { isObject, protocolError as failure, trafficType, transformSse } from "./wire.mjs";
 
 const auditTransports = new Set(["disabled", "existing-tools", "tool-choice", "structured-output", "multiple-candidates",
     "tool-history", "tool-transport", "tool-transport-buffered", "tool-transport-buffered-fields", "tool-transport-native-streaming"]);
@@ -288,6 +288,13 @@ class StreamRestorer {
         return { kept: [], text: state.channel === index ? text : "" };
     }
     finish(state, reason) {
+        // An unrecognised provider ending is left to the integrity check, which rejects it
+        // and keeps the native code. Restoration then stays unconfirmed.
+        if (reason != null && !auditFinishReasons.has(reason)) {
+            this.failed = true;
+            state.terminal = true;
+            return reason;
+        }
         if ([...state.calls.values()].some(call => call.kind === "unknown")) throw failure("anti_truncation_missing_tool_name");
         const synthetic = [...state.calls.values()].filter(call => call.kind === "synthetic");
         if (synthetic.length > 1) throw failure("anti_truncation_multiple_calls");
@@ -338,7 +345,6 @@ export function wrapAntiTruncationStream(response, toolName, onMetadata = () => 
         if (data.trim() === "[DONE]") {
             if (!processor.failed) processor.done();
             onMetadata({ restored: processor.failed ? null : processor.restored, streamDone: true });
-            emit(sseData({ choices: [], router_anti_truncation: { restored: processor.restored } }));
             emit(raw + "\n\n");
             done = true;
             return;
@@ -349,10 +355,13 @@ export function wrapAntiTruncationStream(response, toolName, onMetadata = () => 
         const tier = trafficType(parsed.usage);
         if (tier) onMetadata({ trafficType: tier });
         if (parsed.error || event === "error") processor.failed = true;
-        const result = processor.failed ? parsed : processor.process(parsed);
-        if (!processor.failed) {
-            const choice = Array.isArray(result?.choices) ? result.choices.find(choice => (choice.index ?? 0) === 0) : null;
-            if (choice?.finish_reason != null) onMetadata({ finishReason: choice.finish_reason });
+        const skipped = processor.failed;
+        const result = skipped ? parsed : processor.process(parsed);
+        const choice = !skipped && Array.isArray(result?.choices) ? result.choices.find(choice => (choice.index ?? 0) === 0) : null;
+        if (choice?.finish_reason != null) {
+            onMetadata({ finishReason: choice.finish_reason });
+            // Like a buffered reply, the result travels on the finish chunk, not in an extra empty-choices chunk.
+            if (!processor.failed) result.router_anti_truncation = { restored: processor.restored };
         }
         let replaced = false;
         emit(lines.flatMap(line => {

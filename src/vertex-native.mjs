@@ -1,4 +1,4 @@
-import { vertexJsonSchema } from "./vertex-schema.mjs";
+import { responseJsonSchema, vertexJsonSchema } from "./vertex-schema.mjs";
 import { isObject } from "./wire.mjs";
 // OpenAI-compatible requests translated to Vertex's native generateContent format,
 // with the checks that decide whether a request translates without loss.
@@ -20,6 +20,15 @@ const requestFields = new Set(["model", "messages", "stream", "stream_options", 
 const thinkingFields = new Set(["thinking_budget", "thinkingBudget", "thinking_level", "thinkingLevel", "include_thoughts", "includeThoughts"]);
 const budgets = { low: 1024, medium: 8192, high: 24576 };
 const keys = (value, allowed) => isObject(value) && Object.keys(value).every(key => allowed.includes(key));
+// OpenAI's per-image detail becomes Gemini's request-wide media resolution only when
+// every image asks for the same low/high level. Mixed, missing or "auto" details (a
+// rendered text page has none) keep the provider default.
+const imageResolutions = new Map([["low", "MEDIA_RESOLUTION_LOW"], ["high", "MEDIA_RESOLUTION_HIGH"]]);
+function detailResolution(messages) {
+  const levels = messages.flatMap(m => Array.isArray(m?.content) ? m.content.filter(p => p?.type === "image_url") : [])
+    .map(part => imageResolutions.get(part.image_url?.detail));
+  return levels.length && levels.every(level => level && level === levels[0]) ? levels[0] : undefined;
+}
 
 // Experimental text requests only. Fall back to the original OpenAI-compatible
 // transport when translation would discard fields, message metadata or media.
@@ -77,10 +86,16 @@ export function supportsNativeRequest(payload) {
       }
     }
     if (message.role === "tool" && (typeof message.content !== "string" || !message.tool_call_id)) return false;
+    // Vertex systemInstruction is text-only, so instructions cannot carry images.
+    const imageAllowed = message.role !== "system" && message.role !== "developer";
     if (message.content != null && typeof message.content !== "string" && !(Array.isArray(message.content) && message.content.every(part =>
       (keys(part, ["type", "text"]) && part.type === "text" && typeof part.text === "string") ||
-      (keys(part, ["type", "image_url"]) && part.type === "image_url" && keys(part.image_url, ["url"]) && /^data:[^;,]+;base64,.+$/s.test(part.image_url.url))))) return false;
+      (imageAllowed && keys(part, ["type", "image_url"]) && part.type === "image_url" && keys(part.image_url, ["url", "detail"]) &&
+        [undefined, null, "auto", "low", "high"].includes(part.image_url.detail) && /^data:[^;,]+;base64,.+$/s.test(part.image_url.url))))) return false;
   }
+  // An explicit request-wide resolution cannot also keep a different level that every image asked for.
+  const level = detailResolution(payload.messages), override = payload.extra_body?.google?.media_resolution;
+  if (level && override != null && override !== level) return false;
   const check = { ...payload, messages: payload.messages.map(m => ({ role: m.role === "tool" ? "user" : m.role, content: "" })) };
   delete check.tool_choice;
   return supportsNativeTextStream(check);
@@ -158,12 +173,16 @@ function buildNativeBody(payload) {
       if (typeof call?.id === "string" && call.function?.name) callNames.set(call.id, call.function.name);
     }
   }
+  let leading = true;
   for (const message of payload.messages) {
     if (!message || typeof message !== "object") continue;
-    if (message.role === "system" || message.role === "developer") {
+    // Only the leading instructions become systemInstruction. Like SillyTavern's own
+    // Google converter, later ones (post-history, depth prompts) stay in place as user text.
+    if (leading && (message.role === "system" || message.role === "developer")) {
       systemParts.push(...contentParts(message.content));
       continue;
     }
+    leading = false;
     const role = message.role === "assistant" ? "model" : "user";
     const parts =
       message.role === "assistant"
@@ -196,10 +215,10 @@ function buildNativeBody(payload) {
     generationConfig.responseMimeType = "application/json";
   } else if (responseFormat?.type === "json_schema") {
     generationConfig.responseMimeType = "application/json";
-    const schema = responseFormat.json_schema?.schema ?? responseFormat.json_schema;
-    generationConfig.responseJsonSchema = vertexJsonSchema(schema);
+    generationConfig.responseJsonSchema = responseJsonSchema(responseFormat.json_schema);
   }
-  if (google.media_resolution != null) generationConfig.mediaResolution = google.media_resolution;
+  const mediaResolution = google.media_resolution ?? detailResolution(payload.messages);
+  if (mediaResolution != null) generationConfig.mediaResolution = mediaResolution;
   if (google.thinking_config != null) {
     generationConfig.thinkingConfig = Object.fromEntries(Object.entries(google.thinking_config)
       .map(([key, value]) => [key.replace(/_([a-z])/g, (_, c) => c.toUpperCase()), value]));
@@ -212,13 +231,13 @@ function buildNativeBody(payload) {
   // Like the compatible endpoint, keep provider safety defaults unless the client supplies settings.
   if (google.safety_settings != null) body.safetySettings = structuredClone(google.safety_settings);
   if (google.cached_content != null) body.cachedContent = google.cached_content;
-  const declarations = (Array.isArray(payload.tools) ? payload.tools : [])
-    .filter((tool) => tool?.type === "function" && tool.function?.name)
-    .map((tool) => ({
+  // The index comes from the request's own tools array, so a schema error names the right tool.
+  const declarations = (Array.isArray(payload.tools) ? payload.tools : []).flatMap((tool, index) =>
+    tool?.type === "function" && tool.function?.name ? [{
       name: tool.function.name,
       description: tool.function.description || "",
-      parametersJsonSchema: vertexJsonSchema(tool.function.parameters ?? { type: "object", properties: {} }, "/tools/function/parameters"),
-    }));
+      parametersJsonSchema: vertexJsonSchema(tool.function.parameters ?? { type: "object", properties: {} }, `/tools/${index}/function/parameters`),
+    }] : []);
   if (declarations.length > 0) {
     body.tools = [{ functionDeclarations: declarations }];
     const config = toolConfig(payload);

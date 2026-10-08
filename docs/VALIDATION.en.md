@@ -6,6 +6,18 @@ Local fixtures, live standalone requests and historical router checks cover diff
 
 ## Standalone package
 
+### Unreleased fixes and refinements (2026-10-07 to 10-08)
+
+At the time of writing, the working tree passes 176 local tests with `node --test test/*.test.mjs` and 88 release-file checks with `node scripts/check.mjs`. Every test uses port 0, a temporary state directory, dummy credentials and a simulated upstream; no real Google, proxy, browser or SillyTavern call was made. New fixtures cover the fields and redaction of provider error details (including the request's own credential, and stream error events from both the compatible and native endpoints), a stalled error body returning the provider status after about 5 seconds with prompt retry on or off, the first save signing out other sessions opened with the setup link, line wrapping that stays inside the page, and WebP page output. In a scratch copy, removing the two error-body timers made the stalled-body fixture time out, and restoring the earlier summed-width line wrapping let ink reach x=1023, past the 988px text edge, so the line-wrapping fixture failed.
+
+Not yet verified: live WebP image requests on the compatible and native endpoints; a real connection through a proxy with `NODE_USE_ENV_PROXY` (the test covers only the `NO_PROXY` direct path); Google's real error envelopes and ErrorInfo reasons, and whether the 240-character cap is useful; what the compatible endpoint sends for stream usage when the request does not set `include_usage`; `MALFORMED_FUNCTION_CALL` on real Flex, Express or streaming traffic; an actual run of the new CI matrix (macOS, Node.js 22.9.0); the console with a screen reader, at narrow widths and in the dark theme; the Tavern panel's new messages, and a WebP image passing through Tavern's own `convertGooglePrompt` to Vertex.
+
+### 0.6.0 Unicode and image input, SillyTavern integration 0.3.0 (2026-10-02 to 10-04)
+
+At the 0.6.0 commit, `npm run verify` passes 85 release-file checks and 135 local tests (rerun on a clean export of that commit). Live evidence is small and shows only deployment and basic request/response compatibility. Unicode input passed short requests with extension UI v0.2.0 (then a separate checkbox): a temporary gateway instance in normal, buffered and streaming anti-truncation modes, and the installed Tavern in off, buffered and streaming modes. Image input had a single PNG-encoded streaming request through a local OpenAI-compatible relay to Vertex (200, stop and DONE, exact transcription), not through this gateway's own authentication path.
+
+These checks do not establish long-context comprehension, fewer truncations, progressive delivery for image requests or reduced filtering, and live import and persistence of the UI 0.3.0 selector remain unverified. See [image input validation](IMAGE-INPUT-VALIDATION.md), the [Unicode input acceptance record](UNICODE-INPUT-AUDIT.md) and the [2026-09-30 review (Chinese)](AUDIT-2026-09-30.md).
+
 ### 0.5.2 settings lock, probe tier and code cleanup (2026-09-26)
 
 `npm run verify` passes syntax/credential/private-path checks for 58 release files and 85 local tests. A new fixture covers stale locks: a fresh lock still returns 409, and a lock older than a minute is cleared so the save succeeds. Reverting the fix in a scratch copy made the fixture fail. Local runs confirmed that with an upstream sending a chunk every 300 ms and a 1-second timeout, the stream is cut off after about 1.1 s and logged as `504 upstream_timeout`, and that a console on port 80 answered 403 before the fix and 200 after it. In a browser against a local simulated upstream, the connection test showed `ON_DEMAND_PRIORITY` for streaming and nonstream requests, and a lock conflict showed the Chinese message.
@@ -55,9 +67,11 @@ No live Google inference was performed and no daily credentials or runtime confi
 
 Version 0.3.1 passes 53 local tests, adding empty/reasoning-only completions, terminal reasons for each candidate, missing DONE, invalid tool arguments, HTTP-200 error wrappers, Schema preflight and structured-output validation. Validation does not repair output; logs contain only fixed states and booleans. A desktop browser preview using the actual event-rendering functions and CSS checked seven integrity outcomes and request IDs. This was a component fixture, not a repeat of the full sign-in/configuration workflow.
 
+Version 0.3.0 adds local tests for catalog authentication/pagination/errors, legacy migration, model persistence, alias routing, and normal/buffered/streaming modes with both JSON and SSE clients. Browser checks used a simulated catalog and upstream to save six profiles for two models, reject duplicate names, discard edits, reload saved profiles and select each mode for testing. Buffered replies arrived together; streaming replies arrived progressively. These checks do not verify real catalog permissions or model access.
+
 The 0.2.0 browser check used isolated fixture credentials and a simulated upstream: Express/Flex save/apply, progressive text restoration, light/dark themes and narrow layouts. This does not prove live credentials, Gemini 3.7 availability or a particular account's Express/Flex/Priority entitlement.
 
-These tests use local fixtures and make no Vertex calls. CI is configured for Node.js 22 and 24 on both Linux and Windows. See [Actions](https://github.com/ken050210/vertex-streaming-anti-truncation/actions) for actual run results.
+These tests use local fixtures and make no Vertex calls. CI is configured for Node.js 22 and 24 on Linux, Windows and macOS, plus the minimum supported Node.js 22.9.0 on Linux; each job has a 15-minute limit. See [Actions](https://github.com/ken050210/vertex-streaming-anti-truncation/actions) for actual run results.
 
 The standalone CLI was also checked on Windows with Node.js 24.16.0: health returned 200, an unauthenticated model request returned 401, and the authenticated model list was correct. The service bound to loopback. This check used dummy credentials and sent no model requests.
 
@@ -85,7 +99,7 @@ After following the README and starting the service, run:
 npm run smoke -- --live
 ```
 
-This sends two client requests, each capped at 512 output tokens. With prompt recovery enabled, this can make up to four upstream submissions, and retries include the custom input text. It checks restoration for the normal reply, then checks nonempty text, `stop`, `[DONE]` and restoration for the stream. It also requires at least two content-bearing reads spanning at least 100 ms. Finally, it matches the response's `x-request-id` to `/admin/events`.
+This sends two client requests, each capped at 512 output tokens. With prompt recovery enabled, this can make up to four upstream submissions, and retries include the custom input text. It checks restoration for the normal reply, then checks nonempty text, `stop`, `[DONE]` and restoration for the stream. It also requires at least two content-bearing reads spanning at least 100 ms. Finally, it matches the response's `x-request-id` to `/admin/events`. With image input enabled, the command stops before sending any request, because image requests use the buffered fallback and cannot pass the streaming check.
 
 The receipt contains metadata only. Read counts and timing depend on the model, network and buffering; one run cannot guarantee the same delivery pattern for every reply.
 
@@ -94,5 +108,3 @@ The receipt contains metadata only. Read counts and timing depend on the model, 
 Short requests and simulated streams do not prove that long replies will avoid truncation. The gateway cannot restore content the model never generated or the network never delivered. A model may also return ordinary text directly, in which case the log reports `restored: false`.
 
 Multiple Gemini models can now be configured; this does not establish live compatibility for every model. Compatibility with other providers, public remote deployment and other clients has not been established.
-
-Version 0.3.0 adds local tests for catalog authentication/pagination/errors, legacy migration, model persistence, alias routing, and normal/buffered/streaming modes with both JSON and SSE clients. Browser checks used a simulated catalog and upstream to save six profiles for two models, reject duplicate names, discard edits, reload saved profiles and select each mode for testing. Buffered replies arrived together; streaming replies arrived progressively. These checks do not verify real catalog permissions or model access.

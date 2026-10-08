@@ -1,4 +1,4 @@
-// Compact Unicode and current-floor matching follow Genesis Corridor v0.7.2.
+// Compact Unicode and current-floor matching follow the encoder by 灰鸠「GoldRush」 (see NOTICE.md).
 // Match message text only: never substitute serialized protocol fields.
 // The client supplies the actual chat floor; assembled messages are not a chat store.
 const reasons = new Set(["encoded", "floor-not-found", "no-encodable-text"]);
@@ -48,20 +48,43 @@ export function prepareUnicodeInput(input, enabled, limitBytes) {
     throw inputError(400, "unicode_floor_required", "Unicode input requires router_unicode_input.user_floor from the latest real user chat floor");
   }
   const floor = source.user_floor;
-  const variants = [...new Set([floor, floor.trim(), floor.replace(/\r\n?/g, "\n")].filter(Boolean))];
+  // Longest form first, so at one position the original wins over its trimmed copy.
+  const variants = [...new Set([floor, floor.trim(), floor.replace(/\r\n?/g, "\n")].filter(Boolean))]
+    .map(text => ({ text, encoded: encodeUnicodeText(text) })).filter(variant => variant.encoded.text !== variant.text)
+    .sort((left, right) => right.text.length - left.text.length);
   const metadata = { reason: "floor-not-found", method: "chat-floor-match", encodedCharacters: 0, matchedMessages: 0, occurrences: 0 };
+  // One left-to-right pass, so an inserted block is never matched again. Unlike the
+  // reference, a match that lies inside a tag or an existing ⟦U:…⟧ block of the
+  // surrounding text (a preset's <剧情> tag, say) is left unchanged. A tag here
+  // cannot contain another "<" or a newline, so a stray "<3" protects nothing.
   const replaceText = text => {
-    let value = String(text ?? "");
-    for (const candidate of variants) {
-      if (!value.includes(candidate)) continue;
-      const encoded = encodeUnicodeText(candidate);
-      if (encoded.text === candidate) continue;
-      const pieces = value.split(candidate);
-      metadata.occurrences += pieces.length - 1;
-      metadata.encodedCharacters += (pieces.length - 1) * encoded.count;
-      value = pieces.join(encoded.text);
+    const value = String(text ?? "");
+    if (!variants.some(variant => value.includes(variant.text))) return value;
+    const spans = [...value.matchAll(/<[^<>\n]*>|⟦U:[0-9a-fA-F\s]+⟧/g)].map(match => [match.index, match.index + match[0].length]);
+    const isProtected = (at, length) => {
+      let low = 0, high = spans.length;
+      while (low < high) { const mid = (low + high) >> 1; if (spans[mid][0] <= at) low = mid + 1; else high = mid; }
+      return low > 0 && at + length <= spans[low - 1][1];
+    };
+    const find = (variant, from) => {
+      let at = value.indexOf(variant.text, from);
+      while (at >= 0 && isProtected(at, variant.text.length)) at = value.indexOf(variant.text, at + 1);
+      return at;
+    };
+    const next = variants.map(variant => find(variant, 0));
+    let result = "", from = 0;
+    for (;;) {
+      let best = -1;
+      for (const [index, at] of next.entries()) if (at >= 0 && (best < 0 || at < next[best])) best = index;
+      if (best < 0) break;
+      const { text: match, encoded } = variants[best];
+      result += value.slice(from, next[best]) + encoded.text;
+      from = next[best] + match.length;
+      metadata.occurrences++;
+      metadata.encodedCharacters += encoded.count;
+      for (const [index, at] of next.entries()) if (at >= 0 && at < from) next[index] = find(variants[index], from);
     }
-    return value;
+    return result + value.slice(from);
   };
   const messages = payload.messages.map(message => {
     if (!message || typeof message !== "object") return message;

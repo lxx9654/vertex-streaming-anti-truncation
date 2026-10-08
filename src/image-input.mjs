@@ -1,9 +1,15 @@
-// Text-to-PNG input, inspired by Antigravity's experimental imagectx pipeline.
+// Text-to-image input (lossless WebP pages), inspired by Antigravity's experimental imagectx pipeline.
 // No text, images or data URLs are written to disk or diagnostics.
 import { fileURLToPath } from 'node:url';
 import { readFile } from 'node:fs/promises';
 export const IMAGE_INPUT_MODES = ['off', 'current-turn', 'all'];
 const fail = (status, code) => Object.assign(new Error(code), { status, code });
+// A bundled CJK font cannot faithfully render every control/emoji sequence.
+// Text-presentation symbols such as ♥ © ™ are left to the glyph coverage check.
+const UNSUPPORTED = /[\p{Emoji_Presentation}\p{Regional_Indicator}\p{Emoji_Modifier}\u200d\ufe0f\u20e3\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/u;
+// Exempt from glyph coverage: layout whitespace, and format characters that draw nothing
+// (ZWSP, ZWNJ, WJ, BOM, VS15), so invisible pasted characters do not reject the request.
+const NO_GLYPH = '\n\r\t\u200b\u200c\u2060\ufeff\ufe0e';
 let canvasModule;
 // The bundled font has a Unicode format-12 cmap. Check glyph coverage instead of
 // relying on different host OS fallback fonts or silently emitting missing-glyph boxes.
@@ -73,20 +79,38 @@ export async function prepareImageInput(input, mode = 'off', limitBytes = 8 * 10
   const measure = createCanvas(1,1).getContext('2d');
   measure.font = '20px RouterCJK';
   const segmenter = new Intl.Segmenter('und', { granularity: 'grapheme' });
-  async function textParts(text, role) {
+  const widths = new Map();
+  async function textParts(text, role, param) {
     if (!text.trim()) return [{type:'text', text}];
-    // A bundled CJK font cannot faithfully render every control/emoji sequence.
     // Keep input intact by failing explicitly, never replace unknown glyphs silently.
-    if (/[\p{Extended_Pictographic}\p{Regional_Indicator}\p{Emoji_Modifier}\u200d\ufe0f\u20e3]/u.test(text) || /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(text)) throw fail(400, 'image_input_unsupported_characters');
-    for (const character of text) if (!'\n\r\t'.includes(character) && !covers(character.codePointAt(0))) throw fail(400, 'image_input_unsupported_characters');
+    // The client error names the part and code point; the message stays the fixed code.
+    for (const character of text) {
+      const point = character.codePointAt(0);
+      if (UNSUPPORTED.test(character) || (!NO_GLYPH.includes(character) && !covers(point))) throw Object.assign(
+        fail(400, 'image_input_unsupported_characters'), { param, character: 'U+' + point.toString(16).toUpperCase().padStart(4, '0') });
+    }
     const lines=[];
     for (const raw of text.replace(/\r\n?/g,'\n').replace(/\t/g,'    ').split('\n')) {
-      let line='';
+      // Sum cached grapheme widths: re-measuring the growing line made wrapping quadratic per line.
+      // Summed widths drift on kerned pairs such as "(j" or "fV", so each line is measured once
+      // when it closes; on overflow trailing graphemes covering the excess carry to the next line.
+      let segs=[], width=0;
+      const close = () => {
+        let keep = segs.length, over = keep > 1 ? measure.measureText(segs.join('')).width - 960 : 0;
+        while (over > 0) {
+          while (over > 0 && keep > 1) over -= widths.get(segs[--keep]);
+          over = keep > 1 ? measure.measureText(segs.slice(0,keep).join('')).width - 960 : 0;
+        }
+        lines.push(segs.slice(0,keep).join(''));
+        segs = segs.slice(keep); width = segs.reduce((sum, s) => sum + widths.get(s), 0);
+      };
       for (const {segment} of segmenter.segment(raw)) {
-        if (measure.measureText(line+segment).width > 960) { lines.push(line); line=''; }
-        line+=segment;
+        let advance = widths.get(segment);
+        if (advance === undefined) widths.set(segment, advance = measure.measureText(segment).width);
+        while (segs.length && width + advance > 960) close();
+        segs.push(segment); width+=advance;
       }
-      lines.push(line);
+      do close(); while (segs.length);
     }
     const pageCount=Math.ceil(lines.length/36);
     if (metadata.pages+pageCount>100) throw fail(413,'image_input_too_large');
@@ -101,10 +125,12 @@ export async function prepareImageInput(input, mode = 'off', limitBytes = 8 * 10
       ctx.font='20px RouterCJK';ctx.fillStyle='#212529';
       ctx.fillText(`[Role: ${role.toUpperCase()}] [Part ${page+1}/${pageCount}]`,28,29);
       rows.forEach((line,i)=>ctx.fillText(line,28,70+i*28));
-      const png=await canvas.encode('png');
-      metadata.pages++;metadata.bytes+=png.length;
-      if(png.length>4*1024*1024 || metadata.bytes>12*1024*1024 || metadata.bytes*4/3>limitBytes) throw fail(413,'image_input_too_large');
-      parts.push({type:'image_url',image_url:{url:'data:image/png;base64,'+png.toString('base64')}});
+      // In @napi-rs/canvas only quality 100 selects lossless WebP (VP8L); lower values are lossy.
+      // Pixels decode identically to PNG; full prose pages are about 1.3-3x smaller, one-line pages slightly larger.
+      const image=await canvas.encode('webp',100);
+      metadata.pages++;metadata.bytes+=image.length;
+      if(image.length>4*1024*1024 || metadata.bytes>12*1024*1024 || metadata.bytes*4/3>limitBytes) throw fail(413,'image_input_too_large');
+      parts.push({type:'image_url',image_url:{url:'data:image/webp;base64,'+image.toString('base64')}});
     }
     return parts;
   }
@@ -115,9 +141,10 @@ export async function prepareImageInput(input, mode = 'off', limitBytes = 8 * 10
     const parts=typeof content==='string'?[{type:'text',text:content}]:content;
     if(!Array.isArray(parts)){messages.push(message);continue;}
     const before=metadata.pages, converted=[];
-    for(const part of parts) {
+    for(const [position,part] of parts.entries()) {
       const text=typeof part==='string'?part:part?.type==='text'?part.text:null;
-      if(typeof text==='string' && (typeof part==='string' || Object.keys(part).every(k=>['type','text'].includes(k)))) converted.push(...await textParts(text,message.role));
+      const param=typeof content==='string'?`/messages/${index}/content`:`/messages/${index}/content/${position}`;
+      if(typeof text==='string' && (typeof part==='string' || Object.keys(part).every(k=>['type','text'].includes(k)))) converted.push(...await textParts(text,message.role,param));
       else converted.push(part);
     }
     if(metadata.pages>before){metadata.messages++;messages.push({...message,content:converted});}

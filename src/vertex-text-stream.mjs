@@ -6,7 +6,8 @@ const fail = suffix => { throw protocolError("anti_truncation_native_" + suffix)
 
 // Convert the native partialArgs for our one owned string into valid, incremental
 // OpenAI tool JSON. The existing restorer then handles it just like a stable call.
-export function wrapNativeTextStream(response, toolName, model, onNativeUsage = () => {}) {
+// The empty-choices usage chunk follows OpenAI's stream_options.include_usage.
+export function wrapNativeTextStream(response, toolName, model, onNativeUsage = () => {}, includeUsage = true) {
   if (!response.ok || !response.body) return response;
   const id = "chatcmpl-" + randomUUID(), created = Math.floor(Date.now() / 1000);
   let started = false, stringStarted = false, stringClosed = false, callClosed = false;
@@ -70,7 +71,7 @@ export function wrapNativeTextStream(response, toolName, model, onNativeUsage = 
   }, emit => {
     if (failed) return;
     if (!terminal) fail("stream_interrupted");
-    if (usage) emit(sseData({ id, object: "chat.completion.chunk", created, model, choices: [], usage }));
+    if (includeUsage && usage) emit(sseData({ id, object: "chat.completion.chunk", created, model, choices: [], usage }));
     emit(sseData("[DONE]"));
   });
 }

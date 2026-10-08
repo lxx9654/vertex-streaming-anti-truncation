@@ -7,7 +7,7 @@ import { upstreamDispatcher } from "../../src/gateway.mjs";
 import { prepareSillyTavernRequest, restoreSillyTavernResponse, requestError } from "../../src/sillytavern.mjs";
 import { sseData } from "../../src/wire.mjs";
 import { waitWithSignal } from "../../src/abort.mjs";
-import { PLUGIN_ID, PLUGIN_VERSION } from "./shared.js";
+import { BODY_LIMIT, PLUGIN_ID, PLUGIN_VERSION } from "./shared.js";
 
 export const info = { id: PLUGIN_ID, name: "Vertex AI Anti-Truncation", description: "Native Vertex text transport using SillyTavern's saved credentials." };
 
@@ -39,14 +39,16 @@ export function createGenerateHandler(adapters, { fetchImpl = fetch, timeoutMs =
     const close = () => { if (!response.writableEnded) client.abort(); };
     response.once("close", close);
     let stage = "request";
+    const imageMode = request.body?.vertex_image_input ?? "off";
     try {
-      const imageMode = request.body?.vertex_image_input ?? "off";
       // Validate normal plugin eligibility before spending CPU rasterizing.
       let prepared = prepareSillyTavernRequest(request, adapters);
       if (imageMode !== "off") {
-        const converted = await prepareImageInput(request.body, imageMode, 8 * 1024 * 1024, {signal});
+        stage = "image";
+        const converted = await prepareImageInput(request.body, imageMode, BODY_LIMIT, {signal});
         prepared = prepareSillyTavernRequest({ ...request, body: converted.payload }, adapters);
         response.setHeader("x-image-input", converted.metadata?.reason || "disabled");
+        response.setHeader("x-image-input-pages", String(converted.metadata?.pages ?? 0));
       }
       stage = "configuration";
       const config = connectionForRequest(request, adapters);
@@ -76,11 +78,13 @@ export function createGenerateHandler(adapters, { fetchImpl = fetch, timeoutMs =
       response.end();
     } catch (error) {
       if (client.signal.aborted || response.destroyed) return;
-      const status = deadline.aborted ? 504 : error.status ?? (stage === "configuration" ? 400 : 502);
+      const status = deadline.aborted ? 504 : error.status ?? (stage === "configuration" ? 400 : stage === "image" ? 503 : 502);
       // Do not echo provider error bodies, URLs, prompts or credential exceptions.
-      const code = deadline.aborted ? "vertex_timeout" : error.protocolFailure || error.status ? error.code : `vertex_${stage}_failed`;
+      const code = deadline.aborted ? "vertex_timeout" : error.protocolFailure || error.status ? error.code
+        : stage === "image" ? "image_render_failed" : `vertex_${stage}_failed`;
       const detail = stage === "configuration" ? "检查 Vertex 凭据和地区；Express、Flex、Priority 需要 global。" :
-        stage === "authentication" ? "Vertex 鉴权失败，请检查已保存的凭据。" : "Vertex 抗截断请求失败。";
+        stage === "authentication" ? "Vertex 鉴权失败，请检查已保存的凭据。" : stage === "image" ? "图片输入转换失败，未改用明文发送。" :
+        imageMode !== "off" && request.body?.vertex_anti_truncation === "off" ? "Vertex 图片输入请求失败。" : "Vertex 抗截断请求失败。";
       const payload = { error: { code, message: `${detail} (${code}, HTTP ${status})` } };
       if (response.headersSent) { response.write(sseData(payload)); response.end(); }
       else {

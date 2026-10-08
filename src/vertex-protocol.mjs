@@ -11,9 +11,11 @@ function candidateMessage(candidate) {
     else if (part.text) message.content += part.text;
     if (part.functionCall) {
       const fc = part.functionCall;
-      if (fc.partialArgs || typeof fc.name !== "string" || !isObject(fc.args)) throw protocolError("invalid_native_tool");
+      // FunctionCall.args is optional: a call to a parameterless function may omit it.
+      const args = fc.args ?? {};
+      if (fc.partialArgs || typeof fc.name !== "string" || !isObject(args)) throw protocolError("invalid_native_tool");
       (message.tool_calls ??= []).push({ id: part.thoughtSignature ? SIGNATURE_ID_PREFIX + part.thoughtSignature : "call_" + randomUUID(),
-        type: "function", function: { name: fc.name, arguments: JSON.stringify(fc.args) } });
+        type: "function", function: { name: fc.name, arguments: JSON.stringify(args) } });
     }
   }
   if (message.tool_calls && !message.content) message.content = null;
@@ -36,14 +38,15 @@ export function translateNativeCompletion(native, model) {
 
 // Real tool requests do not enable partialArgs. Their complete function calls and
 // thought signatures are preserved while normal text is forwarded immediately.
-export function wrapNativeStream(response, model, onUsage = () => {}) {
+// The empty-choices usage chunk follows OpenAI's stream_options.include_usage.
+export function wrapNativeStream(response, model, onUsage = () => {}, includeUsage = true) {
   const id = "chatcmpl-" + randomUUID(), created = Math.floor(Date.now() / 1000);
   const states = new Map();
   let usage;
   return transformSse(response, ({ data }, emit) => {
     if (!data || data.trim() === "[DONE]") return;
     const parsed = JSON.parse(data);
-    if (parsed.error) throw protocolError("native_stream_error");
+    if (parsed.error) throw Object.assign(protocolError("native_stream_error"), { upstreamBody: parsed });
     if (parsed.usageMetadata) { usage = translateUsage(parsed.usageMetadata); onUsage(usage); }
     const promptBlockReason = !parsed.candidates?.length && parsed.promptFeedback?.blockReason;
     const candidates = promptBlockReason ? [{ finishReason: "SAFETY" }] : (parsed.candidates ?? []);
@@ -61,7 +64,7 @@ export function wrapNativeStream(response, model, onUsage = () => {}) {
     }
   }, emit => {
     if (!states.size || [...states.values()].some(s => !s.done)) throw protocolError("native_stream_interrupted");
-    if (usage) emit(sseData({ id, object: "chat.completion.chunk", created, model, choices: [], usage }));
+    if (includeUsage && usage) emit(sseData({ id, object: "chat.completion.chunk", created, model, choices: [], usage }));
     emit(sseData("[DONE]"));
   });
 }

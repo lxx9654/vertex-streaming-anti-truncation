@@ -3,7 +3,12 @@ import { settingsFromEnv } from "../src/config.mjs";
 import { modelProfiles } from "../src/model-profiles.mjs";
 import { createSettingsStore } from "../src/settings-store.mjs";
 if (!process.argv.includes("--live")) throw new Error("Pass --live to authorize two 512-token client requests (up to four provider submissions if recovery is enabled)");
-const settings = process.argv.includes("--env") ? await settingsFromEnv() : (await createSettingsStore().load()).settings;
+const loaded = process.argv.includes("--env") ? null : await createSettingsStore().load();
+// With no saved settings, load() falls back to defaults when the environment is invalid; report the cause.
+if (loaded?.envError) throw new Error(loaded.envError);
+const settings = loaded ? loaded.settings : await settingsFromEnv();
+// Image input forces the buffered fallback, so the native streaming check below could never pass.
+if (settings.imageInput !== "off") throw new Error("Image input forces tool-transport-buffered-fields; set it to off before running the streaming smoke test");
 const requested = process.argv.includes("--model") ? process.argv[process.argv.indexOf("--model") + 1] : null;
 if (process.argv.includes("--model") && (!requested || requested.startsWith("--"))) throw new Error("--model requires a saved streaming alias");
 const models = modelProfiles(settings.models, settings.antiTruncation);

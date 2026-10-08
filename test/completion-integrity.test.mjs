@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { guardCompletionStream, inspectCompletion, integrityLogFields } from "../src/completion-integrity.mjs";
-import { vertexJsonSchema } from "../src/vertex-schema.mjs";
+import { structuredOutputExpectation, vertexJsonSchema } from "../src/vertex-schema.mjs";
+import { nativeRequestBody } from "../src/vertex-native.mjs";
 
 const event = value => "data: " + (typeof value === "string" ? value : JSON.stringify(value)) + "\n\n";
 const chunk = (delta, finish_reason = null, index = 0) => ({ choices: [{ index, delta, finish_reason }] });
@@ -64,8 +65,8 @@ test("SSE validates every candidate and reports length, refusal and tool endings
 });
 
 test("integrity logging projects only fixed enums and booleans", () => {
-  const result = integrityLogFields({ outcome: "private-output", finishReason: "private-tool", streamDone: "true", content: "secret", hasContent: 1 });
-  assert.deepEqual(result.responseIntegrity, { outcome: "incomplete", finishReason: null, streamDone: null,
+  const result = integrityLogFields({ outcome: "private-output", finishReason: "private-tool", nativeFinishReason: "private native text", streamDone: "true", content: "secret", hasContent: 1 });
+  assert.deepEqual(result.responseIntegrity, { outcome: "incomplete", finishReason: null, nativeFinishReason: null, streamDone: null,
     hasContent: false, hasToolCalls: false, hasReasoning: false, hasRefusal: false });
   assert.deepEqual(integrityLogFields(null), {});
 });
@@ -117,6 +118,40 @@ test("unsupported constraints and unresolved or external refs fail with a parame
   }
   const schema = { type: "object", $defs: { value: { type: ["string", "null"] } }, properties: { value: { $ref: "#/$defs/value" } } };
   assert.deepEqual(vertexJsonSchema(schema), schema);
+});
+
+test("schema error paths point at the offending tool and the node that holds a bad $ref", () => {
+  const param = run => { try { run(); } catch (error) { assert.equal(error.code, "unsupported_native_schema"); return error.param; } assert.fail("expected a schema error"); };
+  assert.equal(param(() => vertexJsonSchema({ type: "object", properties: { a: { type: "array", items: { $ref: "#/$defs/Missing" } } } })),
+    "/response_format/json_schema/schema/properties/a/items/$ref");
+  assert.equal(param(() => vertexJsonSchema({ anyOf: [{ type: "null" }, { $ref: "#/$defs/x~1y" }], $defs: { x: { type: "string" } } })),
+    "/response_format/json_schema/schema/anyOf/1/$ref");
+  const tool = (name, properties) => ({ type: "function", function: { name, parameters: { type: "object", properties } } });
+  const messages = [{ role: "user", content: "fixture" }];
+  assert.equal(param(() => nativeRequestBody({ messages, tools: [tool("first", { x: { type: "string" } }), tool("second", { x: { type: "string", pattern: "x" } })] })),
+    "/tools/1/function/parameters/properties/x/pattern");
+  // A schema sent without the {name, schema} wrapper is reported where it was sent.
+  const bare = { response_format: { type: "json_schema", json_schema: { type: "string", pattern: "x" } } };
+  assert.equal(param(() => structuredOutputExpectation(bare)), "/response_format/json_schema/pattern");
+  assert.equal(param(() => nativeRequestBody({ messages, ...bare })), "/response_format/json_schema/pattern");
+  const wrapped = { response_format: { type: "json_schema", json_schema: { name: "x", schema: { type: "string", pattern: "x" } } } };
+  assert.equal(param(() => structuredOutputExpectation(wrapped)), "/response_format/json_schema/schema/pattern");
+});
+
+test("integrity metadata keeps Google's native finish code as a token, including for rejected endings", async () => {
+  const rejected = inspectCompletion({ choices: [{ message: { content: "" }, finish_reason: "error", native_finish_reason: "MALFORMED_FUNCTION_CALL" }] });
+  assert.equal(rejected.reason, "invalid_finish_reason");
+  assert.equal(integrityLogFields(rejected.integrity).responseIntegrity.nativeFinishReason, "MALFORMED_FUNCTION_CALL");
+  const accepted = inspectCompletion({ choices: [{ message: { content: "x" }, finish_reason: "length", native_finish_reason: "MAX_TOKENS" }] });
+  assert.equal(integrityLogFields(accepted.integrity).responseIntegrity.nativeFinishReason, "MAX_TOKENS");
+  let metadata;
+  const wire = event(chunk({ content: "private partial" })) + event({ choices: [{ index: 0, delta: {}, finish_reason: "error", native_finish_reason: "MALFORMED_FUNCTION_CALL" }] }) + event("[DONE]");
+  await assert.rejects(guardCompletionStream(wireResponse(wire), value => { metadata = value; }).text(), /invalid_finish_reason/);
+  const logged = integrityLogFields(metadata).responseIntegrity;
+  assert.equal(logged.nativeFinishReason, "MALFORMED_FUNCTION_CALL");
+  assert.equal(logged.hasContent, true);
+  assert.equal(JSON.stringify(logged).includes("private"), false);
+  for (const value of ["stop", "Malformed call", "A".repeat(65), 7]) assert.equal(integrityLogFields({ nativeFinishReason: value }).responseIntegrity.nativeFinishReason, null);
 });
 
 test("native structured output validates closed objects, refs and arrays without repairing values", async () => {

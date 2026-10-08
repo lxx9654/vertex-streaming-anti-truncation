@@ -4,12 +4,18 @@ const authNames = { "service-account": "完整模式 · 服务账号", express: 
 const tierNames = { standard: "Standard", flex: "Flex", priority: "Priority" };
 const pageNames = { overview: "总览", connection: "连接配置", models: "模型与版本", events: "请求日志", test: "连接测试" };
 const modeNames = { normal: "正常", buffered: "非流式抗截断", streaming: "流式抗截断" };
+const transportNames = { "tool-transport-native-streaming": "原生参数流", "tool-transport-buffered": "完整还原", "tool-transport": "非流式还原",
+  "tool-transport-buffered-fields": "兼容接口回退（可能等全文）", "existing-tools": "跳过：已有工具", "tool-choice": "跳过：指定工具调用",
+  "structured-output": "跳过：结构化输出", "multiple-candidates": "跳过：多候选", "tool-history": "跳过：工具历史", unknown: "未知" };
+const consoleDown = "无法连接本地控制台，请确认控制台进程仍在运行。";
+const replyInterrupted = "回复中途中断（网关已断开连接），请按请求 ID 在请求日志查看错误码。";
 const state = { csrf: null, config: null, status: null, events: [], dirty: false, page: "overview", probe: null, timer: null,
-  models: [], catalog: null, selected: new Set() };
+  models: [], catalog: null, selected: new Set(), forcedGlobal: false, userLocation: "global", pendingDraft: null, refreshError: null, rendered: {} };
 const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 let toastTimer;
 function toast(message) { $("toast").textContent = message; $("toast").hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => { $("toast").hidden = true; }, 4000); }
 function errorMessage(message) {
+  const catalogFailed = "Google 模型目录返回异常，未应用部分列表，可重试或手动添加模型 ID。";
   const messages = {
     "Invalid local access key": "本地访问密钥不正确。", "Please sign in": "登录已过期，请重新登录。",
     "Invalid VERTEX_PROJECT_ID": "请填写有效的 Google Cloud 项目 ID。", "Invalid VERTEX_API_KEY": "请输入快速模式 API Key。",
@@ -17,7 +23,10 @@ function errorMessage(message) {
     "Service account must contain a valid RSA private key": "服务账号中没有有效的 RSA 私钥，请导入完整 JSON。",
     "vertex service account secret is not valid JSON": "服务账号 JSON 格式无效，请检查是否复制完整。",
     "Only Google's OAuth token endpoint is allowed": "服务账号的 token_uri 必须是 Google 官方 OAuth 地址。",
-    "Set GATEWAY_API_KEY to a random value of at least 16 characters": "请设置至少 16 字符、不含空格的本地网关密钥。",
+    "Set GATEWAY_API_KEY to a random value of at least 16 characters": "请设置 16–512 个可见 ASCII 字符、不含空格的随机本地网关密钥，可用“生成随机密钥”。",
+    "GATEWAY_API_KEY must contain only visible ASCII characters": "本地网关密钥只能包含可见 ASCII 字符（英文字母、数字和半角符号），请检查是否混入中文引号或全角字符，并在连接配置中更换后保存。",
+    "VERTEX_API_KEY must contain only visible ASCII characters": "Express API Key 只能包含可见 ASCII 字符，请检查是否混入中文引号或全角字符，并在连接配置中重新粘贴后保存。",
+    "VERTEX_ACCESS_TOKEN must contain only visible ASCII characters": "OAuth Access Token 只能包含可见 ASCII 字符，请检查是否混入中文引号或全角字符，并在连接配置中重新粘贴后保存。",
     "Configuration changed; reload before saving": "配置已被其他页面修改，请先放弃当前修改并重新加载。",
     "Configuration is being edited by another process": "配置正在被另一个进程保存，请稍后重试。",
     "Port is unavailable; the running service has not been changed": "端口已被占用，当前服务保持原状，请更换端口。",
@@ -46,31 +55,104 @@ function errorMessage(message) {
     "Model list authentication failed; check the selected credentials": "获取目录的鉴权失败，请检查当前所选凭据。",
     "Unable to fetch the model catalog; check the connection": "无法连接 Google 模型目录，请检查网络后重试。",
     "Model listing was cancelled or timed out": "目录拉取已取消或超时，请重试。",
+    "Invalid model catalog response": catalogFailed,
+    "Model catalog response is too large": catalogFailed,
+    "Invalid model catalog pagination": catalogFailed,
+    "Model catalog exceeded the page limit; no partial list was applied": catalogFailed,
+    "Invalid VERTEX_LOCATION": "地区格式无效：须以小写字母开头，只含小写字母、数字和短横线，例如 us-central1。",
+    "Invalid UPSTREAM_TIMEOUT_MS": "上游超时须为 1–1800 秒之间的整数（环境变量 UPSTREAM_TIMEOUT_MS 以毫秒计，为 1000–1800000）。",
+    "Prompt retry error matches must list 1-32 texts of at most 500 characters": "触发重试的上游错误最多 32 行，每行不超过 500 个字符。",
+    "vertex service account secret must contain type, client_email, private_key and an HTTPS token_uri": "请粘贴 type 为 service_account 的完整服务账号 JSON；gcloud 登录生成的用户凭据不能用。",
+    "Invalid service tier": "服务等级无效，请在连接配置中重新选择并保存。",
+    "Invalid authentication mode": "鉴权方式无效，请在连接配置中重新选择并保存。",
+    "Invalid image input mode": "图片输入模式无效，请重新选择。",
+    "Unicode and image input are mutually exclusive": "Unicode 输入转码与图片输入不能同时开启。",
+    "Another operation is in progress": "另一个操作正在进行，请稍后重试。",
+    "Cannot lock configuration": "无法锁定配置文件，请检查状态目录的写入权限后重试。",
+    "Local operation failed; check file permissions and port availability": "本机操作失败，请检查状态目录的文件权限以及端口是否可用。",
+    "Saved configuration is invalid; the existing file was preserved": "已保存的配置文件无效，原文件已保留。请修正或移走状态目录中的 settings.json 后刷新页面。",
+    "Cannot read saved configuration": "无法读取已保存的配置，请检查状态目录的读取权限。",
+    "Session verification failed": "会话校验失败，请刷新页面后重试。",
+    "Start the gateway first": "网关未运行，请先在总览启动网关。",
+    "A paid test must be explicitly requested": "请先勾选同意发送测试请求。",
+    "The gateway did not respond in time": "本地网关在超时时间内没有响应。稍后可在请求日志查看这次请求的结果。",
+    "Cannot reach the local gateway": "控制台连接不上本地网关，请在总览确认网关正在运行。",
+    "Unable to read the Google service-account file (GOOGLE_APPLICATION_CREDENTIALS)": "无法读取 GOOGLE_APPLICATION_CREDENTIALS 指向的服务账号文件。",
+    "Configure exactly one Google authentication method: GOOGLE_APPLICATION_CREDENTIALS, VERTEX_ACCESS_TOKEN or VERTEX_API_KEY": "GOOGLE_APPLICATION_CREDENTIALS、VERTEX_ACCESS_TOKEN 和 VERTEX_API_KEY 只能设置其中一个。",
+    "Unable to read the prompt retry text file (GEMINI_PROMPT_RETRY_TEXT_FILE)": "无法读取 GEMINI_PROMPT_RETRY_TEXT_FILE 指向的重试文本文件。",
+    "credential_error": "凭据无效或无法换取访问令牌：检查密钥/令牌是否含中文引号、全角字符等非 ASCII 字符，服务账号 JSON 是否被删除或停用，系统时间，以及到 oauth2.googleapis.com 的网络。",
+    "upstream_unreachable": "无法连接 Google：请检查网络、代理和 DNS。",
+    "upstream_protocol_error": "上游回复格式异常或中途断开，可以重试；反复出现时请在请求日志查看详情。",
+    "upstream_stream_error": "上游在流式回复中返回了错误，可以重试；若附带 Google 的错误信息，请据此检查。",
+    "native_stream_error": "上游原生流式回复返回了错误，可以重试；若附带 Google 的错误信息，请据此检查。",
+    "invalid_finish_reason": "上游回复的结束原因无法识别，可以重试；反复出现时请记下请求 ID 排查。",
+    "upstream_timeout":"超过上游超时仍未完成，请重试，或在连接配置中调高上游超时。",
+    "image_render_failed": "本地图片渲染或编码失败，不是 Google 的问题。可以重试，或关闭图片输入。",
+    "image_renderer_unavailable": "本机无法加载图片渲染组件或字体，请重新安装依赖，或关闭图片输入。",
+    "image_input_too_large": "转成图片后的请求超过大小上限，请缩短对话，或改用“当前轮转图”。",
+    "image_input_unsupported_characters": "文本含图片字体无法显示的字符（如部分表情或控制字符），请删除这些字符或关闭图片输入。",
+    "image_input_conflict": "Unicode 输入转码与图片输入不能同时开启。",
+    "unicode_input_too_large": "Unicode 转码后请求超过大小上限，请缩短内容或关闭 Unicode 输入转码。",
+    "unicode_floor_required": "已开启 Unicode 输入转码，但请求没有附带 router_unicode_input.user_floor（最新用户楼层原文）。请让客户端附带该字段，或关闭 Unicode 输入转码。",
+    "gateway_port_changed": "网关端口已更改，旧端口不再接受请求，请改用新端口。",
+    "request_too_large": "请求超过 8 MiB 上限。",
+    "empty_upstream_stream": "上游流式回复为空。",
+    "client_disconnected": "客户端已断开连接。",
+    "upstream_body_limit": "上游回复超过大小上限。",
+    "invalid_upstream_json": "上游回复不是有效的 JSON。",
+    "upstream_error_object": "上游返回了错误对象。",
+    "invalid_upstream_completion": "上游回复不是有效的补全结果。",
   };
+  const envPrefix = "Environment settings were ignored: ";
+  if (message?.startsWith(envPrefix)) return "已忽略环境变量中的设置：" + errorMessage(message.slice(envPrefix.length)) + "请在连接配置中填写并保存；保存后控制台改用保存的配置。";
+  const toggle = /^Invalid (UNICODE_INPUT|HIDE_UNAVAILABLE_MODELS|GEMINI_PREFILL_TO_USER|GEMINI_PROMPT_RETRY_ENABLED)$/.exec(message || "");
+  if (toggle) return `环境变量 ${toggle[1]} 只能是 true 或 false。`;
+  if (message?.startsWith("anti_truncation_")) return `抗截断正文还原失败（${message}），可以重试，或用正常版本对比。`;
   if (message?.startsWith("Express model listing is unavailable")) return `当前 Express API Key 无法读取模型目录（${message.match(/HTTP \d+/)?.[0] || "访问受限"}）。可以手动添加模型 ID，或改用服务账号拉取；已保存的模型不受影响。`;
   if (message?.startsWith("Vertex model listing failed")) return `Google 模型目录返回 ${message.match(/HTTP \d+/)?.[0] || "错误"}，请检查鉴权与 API 权限，或手动添加模型 ID。`;
+  // Integrity and protocol codes without their own entry keep the raw code visible.
+  if (!messages[message] && /^[a-z][a-z0-9_]*$/.test(message || "")) return `网关返回错误码 ${message}，可以重试；反复出现时请记下错误码和请求 ID 排查。`;
   return messages[message] || message || "操作失败，请重试。";
 }
+async function request(path, body, signal, retried = false) {
+  let response;
+  try {
+    response = await fetch(path, { method: body === undefined ? "GET" : "POST", credentials: "same-origin", signal,
+      headers: body === undefined ? {} : { "content-type": "application/json", "x-csrf-token": state.csrf || "" },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+  } catch (error) { throw error.name === "AbortError" ? error : new Error(consoleDown); }
+  // Only the console's own 401 means the session is gone: /api/probe relays Google's 401 unchanged,
+  // and an expired logout is handled by its caller so the confirmed discard still applies.
+  if (response.status === 401 && !["/api/login", "/api/logout"].includes(path) &&
+      (await response.clone().json().catch(() => ({}))).error?.message === "Please sign in") showLogin(true);
+  // A sign-in in another tab replaces the shared session cookie; adopt its token and retry once.
+  // The token check runs before anything is saved, started or sent upstream.
+  if (response.status === 403 && !retried && (await response.clone().json().catch(() => ({}))).error?.message === "Session verification failed" &&
+      await renewSession()) return request(path, body, signal, true);
+  return response;
+}
 async function api(path, body) {
-  const response = await fetch(path, { method: body === undefined ? "GET" : "POST", credentials: "same-origin",
-    headers: body === undefined ? {} : { "content-type": "application/json", "x-csrf-token": state.csrf || "" },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-  const result = await response.json();
-  if (!response.ok) {
-    if (response.status === 401 && path !== "/api/login") showLogin();
-    throw new Error(errorMessage(result.error?.message || result.error?.code));
-  }
+  const response = await request(path, body);
+  let result;
+  try { result = await response.json(); } catch { throw new Error(response.ok ? "控制台返回了无法识别的内容，请刷新页面。" : `控制台返回 HTTP ${response.status}，请刷新页面后重试。`); }
+  if (!response.ok) throw new Error(errorMessage(result.error?.message || result.error?.code));
   return result;
 }
-function setError(id, message) { $(id).textContent = message || ""; $(id).hidden = !message; }
+async function renewSession() {
+  const session = await api("/api/session");
+  if (session.authenticated) { state.csrf = session.csrf; return true; }
+  showLogin(true); return false;
+}
+function setError(id, message) { message ||= ""; if ($(id).textContent !== message) $(id).textContent = message; $(id).hidden = !message; }
 async function action(button, fn, errorId = "global-error") {
   const controls = ["form-error", "models-error", "discovery-error"].includes(errorId)
     ? [...document.querySelectorAll("#settings-form input,#settings-form button,#settings-form select,#settings-form textarea,#page-models input,#page-models select,#page-models button")].map(el => [el, el.disabled]) : [];
   for (const [el] of controls) el.disabled = true;
-  const previous = button.textContent; button.disabled = true; button.textContent = "处理中…";
+  // innerHTML keeps the aria-hidden arrow spans that textContent would flatten into the name.
+  const previous = button.innerHTML; button.disabled = true; button.textContent = "处理中…"; button.setAttribute("aria-busy", "true");
   setError(errorId, "");
   try { await fn(); } catch (error) { setError(errorId, error.message); $(errorId).scrollIntoView({ block: "nearest" }); }
-  finally { for (const [el, disabled] of controls) el.disabled = disabled; button.disabled = false; button.textContent = previous; if (controls.length) updateDraft(false); }
+  finally { for (const [el, disabled] of controls) el.disabled = disabled; button.disabled = false; button.innerHTML = previous; button.removeAttribute("aria-busy"); if (controls.length) updateDraft(false); }
 }
 function showPage(page) {
   state.page = page;
@@ -79,18 +161,42 @@ function showPage(page) {
   $("page-title").textContent = pageNames[page];
   $("main").focus({ preventScroll: true }); window.scrollTo({ top: 0 });
 }
-function showLogin() {
+function showLogin(expired) {
+  if (!$("app-view").hidden) {
+    // A lost session keeps the unapplied draft for the next sign-in, without credentials.
+    if (expired && state.dirty) {
+      const { gatewayKey, serviceAccountJson, apiKey, accessToken, ...settings } = draft();
+      state.pendingDraft = { settings, revision: state.config.revision, userLocation: state.userLocation };
+    } else state.pendingDraft = null;
+    state.dirty = Boolean(state.pendingDraft);
+  }
   state.csrf = null; clearInterval(state.timer); state.probe?.abort();
   $("login-view").hidden = false; $("app-view").hidden = true;
   for (const id of ["gateway-key", "service-account", "api-key", "access-token"]) $(id).value = "";
-  state.dirty = false;
+  setError("login-error", expired ? "登录已过期，请重新登录。" + (state.pendingDraft ? "未应用的修改会在登录后恢复，凭据需重新输入。" : "") : "");
+  $("login-key").focus();
+  // Setup may have finished in this tab since load, so ask again which key the card should request.
+  api("/api/session").then(session => loginCopy(session.setup)).catch(() => {});
 }
+function loginCopy(setup) {
+  $("login-title").textContent = setup ? "首次设置" : "进入本地控制台";
+  $("login-description").textContent = setup ? "请打开启动终端中的首次设置链接，或输入链接中的设置密钥。" : "输入网关密钥，管理你的 Vertex 连接。";
+}
+const credentialFields = { "service-account": ["serviceAccountJson", "服务账号 JSON"], express: ["apiKey", "Express API Key"], "access-token": ["accessToken", "OAuth 令牌"] };
+// Other modes' credentials stored in settings.json. Before the first save they come from the
+// environment, and that save already keeps only the selected mode's credential.
+const otherCredentials = authMode => state.config?.saved ? Object.entries(credentialFields)
+  .filter(([mode, [name]]) => mode !== authMode && state.config.settings[name + "Set"]).map(([, field]) => field) : [];
 function draft() {
-  return { authMode: document.querySelector('[name="authMode"]:checked').value,
+  const authMode = document.querySelector('[name="authMode"]:checked').value;
+  const clear = $("clear-other").checked ? otherCredentials(authMode).map(([name]) => name) : [];
+  // Text left in a hidden credential panel must not replace another mode's stored credential; null deletes it.
+  const credential = (id, mode) => authMode === mode ? $(id).value.trim() : clear.includes(credentialFields[mode][0]) ? null : "";
+  return { authMode,
     serviceTier: document.querySelector('[name="serviceTier"]:checked').value,
     projectId: $("project-id").value.trim(), location: $("location").value.trim(),
-    gatewayKey: $("gateway-key").value.trim(), serviceAccountJson: $("service-account").value.trim(),
-    apiKey: $("api-key").value.trim(), accessToken: $("access-token").value.trim(),
+    gatewayKey: $("gateway-key").value.trim(), serviceAccountJson: credential("service-account", "service-account"),
+    apiKey: credential("api-key", "express"), accessToken: credential("access-token", "access-token"),
     port: Number($("port").value), timeoutMs: Number($("timeout").value) * 1000, antiTruncation: true, models: state.models.map(m => ({ ...m })),
     unicodeInput: $("unicode-input").checked, imageInput: $("image-input").value, hideUnavailableModels: $("hide-unavailable").checked, geminiPrefillToUser: $("prefill-to-user").checked,
     geminiPromptRetryEnabled: $("prompt-retry-enabled").checked, geminiPromptRetryText: $("prompt-retry-text").value,
@@ -107,14 +213,26 @@ function updateRetryText() {
   $("retry-text-count").textContent = chars.length.toLocaleString() + " 字符 · " + bytes.toLocaleString() + " / 192,000 UTF-8 字节 · 粗估 " + estimate.toLocaleString() + " tokens（非 Google 计数）";
   const error = bytes > 192000 ? "文本超过 192000 字节，请缩短后保存。" :
     $("prompt-retry-enabled").checked && !text.trim() ? "请填写自定义文本，或关闭重试。" : "";
-  $("retry-text-error").textContent = error;
-  $("prompt-retry-text").setCustomValidity(error);
-  $("prompt-retry-text").setAttribute("aria-invalid", String(Boolean(error)));
+  const lines = retryMatches() || [];
+  fieldError("prompt-retry-text", "retry-text-error", error);
+  fieldError("prompt-retry-matches", "retry-matches-error", lines.length > 32 || lines.some(line => line.length > 500) ? "最多 32 行，每行不超过 500 个字符。" : "");
   $("prompt-retry-enabled").disabled = !text.trim() && !$("prompt-retry-enabled").checked;
+}
+// Rewrite an alert only when its text changes, so typing does not re-announce it.
+function fieldError(fieldId, errorId, error) {
+  if ($(errorId).textContent === error) return;
+  $(errorId).textContent = error;
+  $(fieldId).setCustomValidity(error);
+  $(fieldId).setAttribute("aria-invalid", String(Boolean(error)));
 }
 function updateDraft(dirty = true) {
   if (dirty) state.dirty = true;
   const d = draft(); const forcedGlobal = d.authMode === "express" || d.serviceTier !== "standard";
+  // Keep the region the user chose while Express, Flex or Priority forces global.
+  if (forcedGlobal !== state.forcedGlobal) {
+    if (forcedGlobal) state.userLocation = $("location").value; else $("location").value = state.userLocation;
+    state.forcedGlobal = forcedGlobal;
+  }
   if (forcedGlobal) $("location").value = "global";
   $("location").disabled = forcedGlobal;
   $("project-id").required = d.authMode !== "express";
@@ -123,6 +241,9 @@ function updateDraft(dirty = true) {
   $("credential-service").hidden = d.authMode !== "service-account";
   $("credential-express").hidden = d.authMode !== "express";
   $("credential-token").hidden = d.authMode !== "access-token";
+  const others = otherCredentials(d.authMode);
+  $("clear-other-row").hidden = !others.length;
+  $("clear-other-label").textContent = "保存时删除其他鉴权方式已保存的凭据：" + others.map(([, label]) => label).join("、");
   $("preview-auth").textContent = authNames[d.authMode]; $("preview-tier").textContent = tierNames[d.serviceTier];
   $("preview-location").textContent = $("location").value || "—"; $("preview-port").textContent = d.port || "—";
   $("tier-help").textContent = d.serviceTier === "standard" ? "使用标准档位，不自动升级服务等级。" : d.serviceTier === "flex"
@@ -137,9 +258,13 @@ function updateDraft(dirty = true) {
   updateRetryText();
   updateSelection();
 }
-function fillConfig() {
-  const c = state.config.settings;
-  for (const name of ["authMode", "serviceTier"]) document.querySelector(`[name="${name}"][value="${c[name]}"]`).checked = true;
+function fillConfig(c = state.config.settings) {
+  const saved = state.config.settings;
+  for (const name of ["authMode", "serviceTier"]) {
+    // An unknown value (for example a mistyped VERTEX_SERVICE_TIER) falls back to the first option.
+    const radios = [...document.querySelectorAll(`[name="${name}"]`)];
+    (radios.find(el => el.value === c[name]) || radios[0]).checked = true;
+  }
   for (const [id, name] of [["project-id", "projectId"], ["location", "location"], ["port", "port"]]) $(id).value = c[name];
   $("timeout").value = c.timeoutMs / 1000;
   $("unicode-input").checked = c.unicodeInput === true;
@@ -151,15 +276,17 @@ function fillConfig() {
   $("prompt-retry-matches").value = (c.geminiPromptRetryMatches || []).join("\n");
   state.models = c.models.map(m => ({ ...m })); renderModels();
   for (const [id, name] of [["gateway-key", "gatewayKey"], ["service-account", "serviceAccountJson"], ["api-key", "apiKey"], ["access-token", "accessToken"]]) {
-    $(id).value = ""; $(id).placeholder = c[name + "Set"] ? "已保存 · 留空保留，输入则替换" : ({ gatewayKey: "至少 16 字符，或生成随机密钥", serviceAccountJson: "粘贴完整的服务账号 JSON，或导入文件", apiKey: "输入 Vertex Express API Key", accessToken: "输入短期 Google OAuth 令牌" })[name];
+    $(id).value = ""; $(id).placeholder = saved[name + "Set"] ? (state.config.saved ? "已保存 · 留空保留，输入则替换" : "已从环境变量导入 · 留空沿用，输入则替换") : ({ gatewayKey: "至少 16 个可见 ASCII 字符，或生成随机密钥",serviceAccountJson: "粘贴完整的服务账号 JSON，或导入文件", apiKey: "输入 Vertex Express API Key", accessToken: "输入短期 Google OAuth 令牌" })[name];
   }
-  $("service-file").value = "";
+  $("service-file").value = ""; $("clear-other").checked = false;
   state.dirty = false; $("saved-badge").textContent = state.config.saved ? "已保存到本机" : "尚未保存";
+  state.forcedGlobal = false;
   updateDraft(false);
 }
+const isReady = c => Boolean(c.gatewayKeySet && (c.authMode === "service-account" ? c.serviceAccountJsonSet : c.authMode === "express" ? c.apiKeySet : c.accessTokenSet));
 function renderStatus() {
   const s = state.status, c = state.config.settings, current = s.active;
-  const ready = Boolean(c.gatewayKeySet && (c.authMode === "service-account" ? c.serviceAccountJsonSet : c.authMode === "express" ? c.apiKeySet : c.accessTokenSet));
+  const ready = isReady(c);
   const label = s.running ? "运行中" : ready ? "已停止" : "待配置";
   $("rail-status").textContent = label; $("rail-lamp").className = "lamp " + (s.running ? "" : "idle");
   $("metric-status").textContent = label; $("metric-active").textContent = s.running ? s.activeRequests + " 个进行中的请求" : "本地 API 尚未监听";
@@ -173,6 +300,8 @@ function renderStatus() {
   if (s.running && s.modelAvailability?.some(m => m.reason === "authentication_failed")) {
     $("runtime-description").textContent = "上游返回 401，当前凭据无法调用模型。请在连接配置修正凭据并保存应用；临时错误不会隐藏模型。";
   }
+  // Unsaved setups open on the connection page, so the startup or environment problem is shown there too.
+  setError("config-warning", s.error ? errorMessage(s.error) : "");
   $("start-button").hidden = s.running || !ready; $("stop-button").hidden = !s.running; $("stop-button").disabled = s.activeRequests > 0; $("setup-button").hidden = ready;
   $("endpoint").textContent = `http://127.0.0.1:${current?.port || c.port}/v1`;
   $("overview-auth").textContent = current ? authNames[current.authMode] : "未启动";
@@ -191,21 +320,23 @@ function renderStatus() {
   updateProbeModel();
 }
 function updateProbeModel() {
-  const row = state.status?.models.find(m => m.id === $("probe-model").value);
-  const retry = state.status?.active?.geminiPromptRetryEnabled;
+  const s = state.status, row = s?.models.find(m => m.id === $("probe-model").value);
+  const retry = s?.active?.geminiPromptRetryEnabled;
   $("probe-cost-notice").textContent = retry
     ? "重试功能已开启：此次测试最多发送 2 次上游请求，每次最多 512 个输出 tokens。重试会带上自定义文本，增加输入用量和费用。"
     : "测试将使用已应用的凭据与服务等级发送一次真实请求，可能产生 Google Cloud 费用。";
   $("probe-consent-label").textContent = retry ? "我同意此次真实测试及最多 1 次自动重试" : "我同意发送这一次真实测试请求";
-  $("probe-model-help").textContent = row ? `${row.upstreamModel} · ${modeNames[row.mode]}` + (row.mode === "buffered" ? " · 完整回复到齐后交付正文。" : "") : "请先在模型与版本中保存配置。";
+  $("probe-model-help").textContent = row ? `${row.upstreamModel} · ${modeNames[row.mode]}` + (row.mode === "buffered" ? " · 完整回复到齐后交付正文。" : "")
+    : !s?.running ? (isReady(state.config.settings) ? "网关未运行，请先在总览启动网关。" : "网关未运行，请先在连接配置中填写凭据并保存。") + (s?.error ? errorMessage(s.error) : "")
+    : s.models.length ? "已应用的模型版本都已停用，请在模型与版本中启用并保存。" : "请先在模型与版本中保存配置。";
   $("probe-button").disabled = !row || !$("probe-consent").checked || Boolean(state.probe);
   $("probe-model").disabled = Boolean(state.probe);
   $("probe-stream").disabled = Boolean(state.probe);
 }
 function renderModels() {
   $("model-rows").innerHTML = state.models.length ? state.models.map((m, i) => `<div class="model-row" data-row="${i}">
-    <label>客户端模型名称<input data-field="id" value="${esc(m.id)}" maxlength="160" spellcheck="false" aria-label="模型 ${i + 1} 的客户端名称"></label>
-    <label>上游模型 ID<input data-field="upstreamModel" value="${esc(m.upstreamModel)}" maxlength="180" spellcheck="false" aria-label="模型 ${i + 1} 的上游 ID"></label>
+    <label>客户端模型名称<input data-field="id" value="${esc(m.id)}" maxlength="160" spellcheck="false" aria-label="客户端模型名称（模型 ${i + 1}）"></label>
+    <label>上游模型 ID<input data-field="upstreamModel" value="${esc(m.upstreamModel)}" maxlength="180" spellcheck="false" aria-label="上游模型 ID（模型 ${i + 1}）"></label>
     <label>传输模式<select data-field="mode" aria-label="模型 ${i + 1} 的传输模式">${Object.entries(modeNames).map(([v, label]) => `<option value="${v}"${v === m.mode ? " selected" : ""}>${label}</option>`).join("")}</select></label>
     <div class="model-actions"><label class="model-enabled"><input type="checkbox" data-field="enabled"${m.enabled !== false ? " checked" : ""} aria-label="启用模型 ${i + 1}">启用</label><button class="btn ghost remove-model" data-remove="${i}" aria-label="移除模型 ${i + 1}">移除</button></div></div>`).join("") : '<div class="empty-state"><strong>还没有模型版本</strong><p>从目录选择或手动添加。保存空列表后，客户端将没有可选模型。</p></div>';
 }
@@ -254,47 +385,80 @@ function compatibilityBadge(result) {
   return (result.prefillConverted ? "<small>预填充已转 USER</small>" : "") +
     (result.promptRetried ? "<small>已插入自定义文本重试 1 次</small>" : "");
 }
+// Fixed enums and counts only. floor-not-found can be normal when the client already encoded the text.
+const unicodeReasons = { "floor-not-found": "未找到楼层原文（也可能已由客户端转码）", "no-encodable-text": "无需转码" };
+function inputBadge(e) {
+  const image = e.imageInput, unicode = e.unicodeInput;
+  return (image ? "<small>" + (image.reason === "encoded" ? `图片已转码 ${esc(image.pages)} 页 · ${esc(image.messages)} 条消息`
+      : "图片转码：" + (image.reason === "no-text" ? "没有可转换的会话文字" : "未知")) + "</small>" : "") +
+    (unicode ? "<small>" + (unicode.reason === "encoded" ? `Unicode 已转码 ${esc(unicode.occurrences)} 处 · ${esc(unicode.matchedMessages)} 条消息 · ${esc(unicode.encodedCharacters)} 字符`
+      : "Unicode 跳过：" + (unicodeReasons[unicode.reason] || "未知")) + "</small>" : "");
+}
 function eventTable(events) {
   if (!events.length) return '<div class="empty-state"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M7 4h18v24H7zM11 10h10M11 15h10M11 20h6"/></svg><strong>暂无请求记录</strong><p>向网关发送请求后，传输与还原状态会显示在这里。</p></div>';
   return '<div class="table-wrap"><table><thead><tr><th>时间 / 请求</th><th>模型版本</th><th>状态</th><th>传输</th><th>正文还原</th><th>请求 / 实际档位</th><th>耗时</th></tr></thead><tbody>' + events.map(e => {
     const a = e.antiTruncation || {};
     const recovered = a.restored === true ? "已还原" : a.restored === false ? "未还原 / 跳过" : "未确认";
-    const transport = a.transport === "tool-transport-native-streaming" ? "原生参数流" : a.transport === "tool-transport-buffered" ? "完整还原" : e.stream ? "SSE 流式" : "普通响应";
+    // Pass-through requests keep the plain stream label; every audited transport, fallback and skip reason has its own.
+    const transport = transportNames[a.transport] || (!a.transport || a.transport === "disabled" ? (e.stream ? "SSE 流式" : "普通响应") : a.transport);
     const success = e.status >= 200 && e.status < 300;
-    return `<tr><td><span class="mono">${esc(new Date(e.at).toLocaleTimeString("zh-CN", { hour12: false }))}</span><small title="${esc(e.requestId)}">${esc(e.requestId.slice(0, 8))}</small></td><td><span class="mono">${esc(e.model || "—")}</span><small>${esc(modeNames[e.mode] || "")}</small></td><td><span class="badge ${success ? "go" : "stop"}">${e.status}</span>${e.code ? `<small class="error-code">${esc(e.code)}</small>` : ""}${integrityBadge(e.responseIntegrity)}${compatibilityBadge(e.geminiCompatibility)}${e.imageInput ? `<small>图片输入：${esc(e.imageInput.reason)} · ${esc(e.imageInput.pages)} 页</small>` : ""}</td><td>${transport}<small>${esc(a.finishReason || "—")}</small></td><td><span class="badge ${a.restored ? "go" : ""}">${recovered}</span><small>${a.streamDone === true ? "流已结束" : a.streamDone === false ? "流未完成" : ""}</small></td><td>${esc(tierNames[e.serviceTier] || "Standard")}<small>${esc(e.trafficType || "上游未报告")}</small></td><td class="mono">${(e.latencyMs / 1000).toFixed(2)} s</td></tr>`;
+    return `<tr><td><span class="mono">${esc(new Date(e.at).toLocaleTimeString("zh-CN", { hour12: false }))}</span><small title="${esc(e.requestId)}">${esc(e.requestId.slice(0, 8))}</small></td><td><span class="mono">${esc(e.model || "—")}</span><small>${esc(modeNames[e.mode] || "")}</small></td><td><span class="badge ${success ? "go" : "stop"}">${e.status}</span>${e.code ? `<small class="error-code" title="${esc(errorMessage(e.code))}">${esc(e.code)}</small>` : ""}${integrityBadge(e.responseIntegrity)}${e.upstreamError ? `<small>Google：${esc([e.upstreamError.status, e.upstreamError.reason].filter(Boolean).join(" · "))}</small>` : ""}${compatibilityBadge(e.geminiCompatibility)}${inputBadge(e)}</td><td><span title="${esc(a.transport || "")}">${esc(transport)}</span><small>${esc(a.finishReason || "—")}</small></td><td><span class="badge ${a.restored ? "go" : ""}">${recovered}</span><small>${a.streamDone === true ? "流已结束" : a.streamDone === false ? "流未完成" : ""}</small></td><td>${esc(tierNames[e.serviceTier] || "Standard")}<small>${esc(e.trafficType || "上游未报告")}</small></td><td class="mono">${(e.latencyMs / 1000).toFixed(2)} s</td></tr>`;
   }).join("") + "</tbody></table></div>";
 }
-function renderEvents() {
-  $("recent-events").innerHTML = eventTable(state.events.slice(0, 4));
+// Rebuilding a table resets its horizontal scroll and drops a text selection: skip unchanged
+// tables, let a poll wait while text inside is selected, and keep the scroll position across a rebuild.
+function renderTable(id, html, force) {
+  const box = $(id), selection = getSelection();
+  if (state.rendered[id] === html || (!force && selection && !selection.isCollapsed && selection.containsNode(box, true))) return;
+  const scroll = box.querySelector(".table-wrap")?.scrollLeft || 0;
+  box.innerHTML = html; state.rendered[id] = html;
+  const wrap = box.querySelector(".table-wrap"); if (wrap) wrap.scrollLeft = scroll;
+}
+function renderEvents(force) {
+  renderTable("recent-events", eventTable(state.events.slice(0, 4)));
   const filter = $("event-filter").value;
-  $("all-events").innerHTML = eventTable(state.events.filter(e => filter === "all" || (filter === "failed" ? e.status >= 400 : e.antiTruncation?.restored === true)));
+  renderTable("all-events", eventTable(state.events.filter(e => filter === "all" || (filter === "failed" ? e.status >= 400 : e.antiTruncation?.restored === true))), force);
 }
 async function refresh() {
-  const [status, events] = await Promise.all([api("/api/status"), api("/api/events")]);
+  let status, events;
+  try { [status, events] = await Promise.all([api("/api/status"), api("/api/events")]); }
+  catch (error) { state.refreshError = error.message; throw error; }
   state.status = status; state.events = events.events; renderStatus(); renderEvents();
-  setError("global-error", "");
+  // Clear only a refresh failure; start, stop and logout failures stay until the next action.
+  if (state.refreshError && $("global-error").textContent === state.refreshError) setError("global-error", "");
+  state.refreshError = null;
 }
 async function enter() {
-  state.config = await api("/api/config"); fillConfig(); await refresh();
+  state.config = await api("/api/config");
+  const pending = state.pendingDraft;
+  fillConfig(pending?.settings);
+  // A restored draft keeps its old revision, so a save after another session's save still gets the conflict message.
+  if (pending) { state.config.revision = pending.revision; state.userLocation = pending.userLocation; state.dirty = true; updateDraft(false); }
+  for (const id of ["global-error", "form-error", "models-error", "discovery-error"]) setError(id, "");
+  await refresh();
+  state.pendingDraft = null;
   $("login-key").value = ""; $("login-view").hidden = true; $("app-view").hidden = false;
-  showPage(state.config.saved || state.config.settings.gatewayKeySet ? "overview" : "connection");
+  showPage(pending ? state.page : state.config.saved || state.config.settings.gatewayKeySet ? "overview" : "connection");
+  if (pending) toast("已恢复登录前未应用的修改；凭据需重新输入。");
   clearInterval(state.timer);
   state.timer = setInterval(() => { if (!document.hidden && state.csrf) refresh().catch(e => setError("global-error", e.message)); }, 5000);
 }
 $("login-form").addEventListener("submit", e => { e.preventDefault(); action(e.submitter, async () => { state.csrf = (await api("/api/login", { key: $("login-key").value })).csrf; await enter(); }, "login-error"); });
 document.querySelectorAll("[data-page],[data-go]").forEach(b => b.addEventListener("click", () => showPage(b.dataset.page || b.dataset.go)));
+// Switching mode changes which credentials the box deletes, so it must be ticked again for the new list.
+document.querySelectorAll('[name="authMode"]').forEach(r => r.addEventListener("change", () => { $("clear-other").checked = false; }));
 $("settings-form").addEventListener("input", () => updateDraft());
 $("settings-form").addEventListener("change", () => updateDraft());
 async function saveConfiguration() {
   const result = await api("/api/config", { settings: draft(), revision: state.config.revision });
   state.config = result; fillConfig(); await refresh(); toast("配置已保存并应用，网关正在运行。");
-  setError("form-error", ""); setError("models-error", "");
+  setError("form-error", ""); setError("models-error", ""); setError("global-error", "");
 }
 async function discardConfiguration() {
   state.config = await api("/api/config"); fillConfig(); setError("form-error", ""); setError("models-error", ""); toast("已重新加载保存的配置。");
 }
 $("settings-form").addEventListener("submit", e => { e.preventDefault(); action($("save-button"), saveConfiguration, "form-error"); });
-$("validate-button").addEventListener("click", e => action(e.currentTarget, async () => { await api("/api/validate", { settings: draft() }); toast("本地配置校验通过，未调用 Google。"); }, "form-error"));
+$("validate-button").addEventListener("click", e => action(e.currentTarget, async () => { await api("/api/validate", { settings: draft() }); toast("本地配置校验通过，未调用 Google。端口是否可用会在保存时检查。"); }, "form-error"));
 $("discard-button").addEventListener("click", e => action(e.currentTarget, discardConfiguration, "form-error"));
 $("models-save").addEventListener("click", e => action(e.currentTarget, saveConfiguration, "models-error"));
 $("models-discard").addEventListener("click", e => action(e.currentTarget, discardConfiguration, "models-error"));
@@ -341,14 +505,29 @@ $("service-file").addEventListener("change", async e => {
 });
 $("service-account").addEventListener("change", () => { try { const v = JSON.parse($("service-account").value); if (!$("project-id").value && v.project_id) { $("project-id").value = v.project_id; updateDraft(); } } catch { /* Save shows a safe validation message. */ } });
 $("generate-key").addEventListener("click", () => { $("gateway-key").value = [...crypto.getRandomValues(new Uint8Array(32))].map(b => b.toString(16).padStart(2, "0")).join(""); updateDraft(); toast("已生成新密钥，请复制后保存配置。"); });
-async function copy(text) { try { await navigator.clipboard.writeText(text); toast("已复制到剪贴板。"); } catch { toast("复制失败，请手动选择文本复制。"); } }
-$("copy-key").addEventListener("click", () => $("gateway-key").value ? copy($("gateway-key").value) : toast("已保存的密钥不回显。需要更换时，请生成新密钥。"));
+async function copy(text) {
+  if (!text) return toast("没有可复制的内容。");
+  try { await navigator.clipboard.writeText(text); toast("已复制到剪贴板。"); } catch { toast("复制失败，请手动选择文本复制。"); }
+}
+$("copy-key").addEventListener("click", () => $("gateway-key").value ? copy($("gateway-key").value)
+  : toast(!state.config.settings.gatewayKeySet ? "请先生成或输入密钥。" : state.config.saved ? "已保存的密钥不回显。需要更换时，请生成新密钥。" : "密钥已从环境变量导入，页面不回显。需要更换时，请生成新密钥。"));
 document.querySelectorAll("[data-copy]").forEach(b => b.addEventListener("click", () => copy($(b.dataset.copy).textContent)));
 $("refresh-button").addEventListener("click", e => action(e.currentTarget, refresh));
-$("start-button").addEventListener("click", e => action(e.currentTarget, async () => { await api("/api/start", {}); await refresh(); toast("网关已启动。"); }));
+// A failed start stores its reason in the status; refresh shows it now instead of at the next poll.
+$("start-button").addEventListener("click", e => action(e.currentTarget, async () => {
+  try { await api("/api/start", {}); } catch (error) { await refresh().catch(() => {}); throw error; }
+  await refresh(); toast("网关已启动。");
+}));
 $("stop-button").addEventListener("click", e => action(e.currentTarget, async () => { await api("/api/stop", {}); await refresh(); toast("网关已停止，控制台仍可使用。"); }));
-$("logout-button").addEventListener("click", e => action(e.currentTarget, async () => { await api("/api/logout", {}); showLogin(); }));
-$("event-filter").addEventListener("change", renderEvents);
+$("logout-button").addEventListener("click", e => {
+  if (state.dirty && !confirm("有未应用的修改，退出后会丢失。仍要退出吗？")) return;
+  action(e.currentTarget, async () => {
+    // A session that already expired counts as signed out.
+    await api("/api/logout", {}).catch(error => { if (error.message !== errorMessage("Please sign in")) throw error; });
+    showLogin(false);
+  });
+});
+$("event-filter").addEventListener("change", () => renderEvents(true));
 $("probe-consent").addEventListener("change", updateProbeModel);
 $("probe-cancel").addEventListener("click", () => state.probe?.abort());
 $("probe-button").addEventListener("click", async () => {
@@ -356,16 +535,28 @@ $("probe-button").addEventListener("click", async () => {
   state.probe = new AbortController(); $("probe-button").disabled = true; $("probe-consent").checked = false; $("probe-cancel").hidden = false;
   updateProbeModel();
   $("probe-output").textContent = ""; $("probe-status").textContent = "请求中…"; $("probe-meta").innerHTML = ""; setError("probe-error", "");
-  let text = "", usage, finish, restored, done = false, reads = 0, firstAt, lastAt;
+  let text = "", usage, finish, restored, done = false, reads = 0, firstAt, lastAt, requestId = null;
   const started = performance.now();
+  // The gateway closes the connection when a reply fails after its headers; the browser then reports a raw network error.
+  const interrupted = error => { throw error.name === "AbortError" ? error : new Error(replyInterrupted); };
+  const showMeta = meta => { $("probe-meta").innerHTML = Object.entries(meta).map(([k, v]) => `<div><dt>${esc(k)}</dt><dd class="mono">${esc(v)}</dd></div>`).join(""); };
   try {
     const stream = $("probe-stream").checked;
-    const response = await fetch("/api/probe", { method: "POST", headers: { "content-type": "application/json", "x-csrf-token": state.csrf }, body: JSON.stringify({ confirm: true, stream, model: $("probe-model").value }), signal: state.probe.signal });
-    if (!response.ok) { const body = await response.json(); throw new Error(`HTTP ${response.status} · ` + errorMessage(body.error?.message || body.error?.code)); }
+    const response = await request("/api/probe", { confirm: true, stream, model: $("probe-model").value }, state.probe.signal);
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      requestId = body.error?.requestId || null;
+      // Google's status, reason and redacted message; shown only through textContent or esc().
+      const google = body.error?.upstreamError;
+      const detail = google ? [google.status, google.reason, google.message].filter(v => typeof v === "string" && v).join(" · ") : "";
+      throw new Error(`HTTP ${response.status} · ` + errorMessage(body.error?.message || body.error?.code) + (detail ? " Google：" + detail : ""));
+    }
+    requestId = response.headers.get("x-request-id");
+    const transport = response.headers.get("x-anti-truncation-transport");
     if (stream) {
       const reader = response.body.getReader(), decoder = new TextDecoder(); let buffer = "";
       for (;;) {
-        const result = await reader.read(); if (result.done) { buffer += decoder.decode(); break; }
+        const result = await reader.read().catch(interrupted); if (result.done) { buffer += decoder.decode(); break; }
         buffer += decoder.decode(result.value, { stream: true }); let match, hasContent = false;
         while ((match = /\r\n\r\n|\n\n/.exec(buffer))) {
           const raw = buffer.slice(0, match.index); buffer = buffer.slice(match.index + match[0].length);
@@ -380,14 +571,21 @@ $("probe-button").addEventListener("click", async () => {
       }
       if (!done) throw new Error("流已中断，未收到结束标志。");
     } else {
-      const body = await response.json(); text = body.choices?.[0]?.message?.content || ""; finish = body.choices?.[0]?.finish_reason;
+      const body = await response.json().catch(interrupted); text = body.choices?.[0]?.message?.content || ""; finish = body.choices?.[0]?.finish_reason;
       usage = body.usage; restored = body.router_anti_truncation?.restored;
     }
     $("probe-output").textContent = text || "上游未返回可显示正文。";
     $("probe-status").textContent = finish === "stop" && text ? "请求完成" : "检查结束原因";
-    const meta = { "请求 ID": response.headers.get("x-request-id"), "结束原因": finish || "未知", "正文还原": restored === true ? "已还原" : restored === false ? "未还原 / 跳过" : "未确认", "实际上游档位": usage?.traffic_type || usage?.extra_properties?.google?.traffic_type || "上游未报告", "耗时": ((performance.now() - started) / 1000).toFixed(2) + " s", ...(stream ? { "含正文读取次数": reads, "正文到达跨度": ((lastAt || 0) - (firstAt || 0)).toFixed(0) + " ms" } : {}) };
-    $("probe-meta").innerHTML = Object.entries(meta).map(([k,v]) => `<div><dt>${esc(k)}</dt><dd class="mono">${esc(v)}</dd></div>`).join("");
-  } catch (error) { $("probe-status").textContent = error.name === "AbortError" ? "已取消" : "测试失败"; setError("probe-error", error.name === "AbortError" ? "请求已取消。" : error.message); }
+    // The raw value stays visible so it can be compared with the README.
+    showMeta({ "请求 ID": requestId, "传输方式": transport === "disabled" ? "未使用抗截断 · disabled" : transportNames[transport] ? transportNames[transport] + " · " + transport : transport || "未知",
+      "结束原因": finish || "未知", "正文还原": restored === true ? "已还原" : restored === false ? "未还原 / 跳过" : "未确认", "实际上游档位": usage?.traffic_type || usage?.extra_properties?.google?.traffic_type || "上游未报告", "耗时": ((performance.now() - started) / 1000).toFixed(2) + " s", ...(stream ? { "含正文读取次数": reads, "正文到达跨度": ((lastAt || 0) - (firstAt || 0)).toFixed(0) + " ms" } : {}) });
+  } catch (error) {
+    const cancelled = error.name === "AbortError", message = cancelled ? "请求已取消。" : error.message;
+    $("probe-status").textContent = cancelled ? "已取消" : "测试失败"; setError("probe-error", message);
+    // The result card states the cause too; partial text stays visible with the error beside it.
+    if (!text) $("probe-output").textContent = cancelled ? message : "测试失败：" + message;
+    showMeta({ ...(text && !cancelled ? { "错误": message } : {}), ...(requestId ? { "请求 ID": requestId } : {}), "耗时": ((performance.now() - started) / 1000).toFixed(2) + " s" });
+  }
   finally { state.probe = null; $("probe-cancel").hidden = true; $("probe-button").disabled = true; await refresh().catch(() => {}); }
 });
 function applyTheme(theme) { document.documentElement.dataset.theme = theme; $("theme-button").textContent = theme === "dark" ? "浅色主题" : "深色主题"; }
@@ -399,10 +597,12 @@ window.addEventListener("beforeunload", e => { if (state.dirty || state.probe) {
   if (setup) history.replaceState(null, "", location.pathname);
   try {
     const session = await api("/api/session");
-    if (session.setup) { $("login-title").textContent = "首次设置"; $("login-description").textContent = "请打开启动终端中的首次设置链接，或输入链接中的设置密钥。"; }
+    loginCopy(session.setup);
     if (session.authenticated) { state.csrf = session.csrf; await enter(); }
     else if (setup) { state.csrf = (await api("/api/login", { key: setup })).csrf; await enter(); }
   } catch (error) { setError("login-error", error.message); }
+  // The login card starts hidden so a signed-in reload does not flash it.
+  if ($("app-view").hidden) { $("login-view").hidden = false; $("login-key").focus(); }
 })();
 
 $("image-input").addEventListener("change", () => { if ($("image-input").value !== "off") $("unicode-input").checked = false; });

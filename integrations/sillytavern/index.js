@@ -3,7 +3,20 @@ import { PLUGIN_ID, PLUGIN_PATH, PLUGIN_VERSION, MODES, createFetchInterceptor, 
 const context = SillyTavern.getContext();
 const events = context.eventTypes ?? context.event_types;
 const labels = { off: "关闭（普通 Vertex）", buffered: "非流式抗截断", streaming: "流式抗截断" };
-let status, select;
+const reasons = { "existing-tools": "已有工具调用", "structured-output": "结构化输出", "multiple-candidates": "多个候选回复",
+  "tool-history": "工具历史", "web-search": "联网搜索", "image-generation": "图片生成", "reverse-proxy": "反向代理",
+  model: "此模型不适用", "too-large": "请求超过 8 MiB" };
+const errors = { unicode_floor_required: "找不到真实用户楼层，已停止发送。请先输入消息，或关闭 Unicode 转码。",
+  unicode_input_too_large: "转码后的请求超过大小限制，已停止发送。请缩短输入或关闭 Unicode 转码。",
+  plugin_not_ready: "服务端插件未就绪或版本不匹配，图片输入已停止发送，未改用明文。请更新服务端插件并重启酒馆。",
+  image_input_requires_supported_request: "图片输入不支持此请求，已停止发送，未改用明文。请去掉不支持的内容或换用支持的模型，或关闭图片输入。",
+  image_input_unsupported_characters: "图片输入不支持 emoji、控制字符或字体缺字，已停止发送。请删除这些字符，或改用“图片·当前轮”/关闭图片输入。",
+  image_input_too_large: "转成图片后超过大小或页数限制，已停止发送。请缩短对话，或改用“图片·当前轮”。",
+  image_renderer_unavailable: "服务端图片渲染组件不可用。请在服务端插件目录运行 npm ci --ignore-scripts 后重启酒馆。",
+  image_render_failed: "服务端图片渲染失败，已停止发送，未改用明文。",
+  request_too_large: "请求超过 8 MiB，插件已拒绝发送。请减少附件或聊天历史。" };
+const backendWarning = "服务端插件未就绪或版本不匹配。安装配套服务端插件并重启酒馆，然后重新检查。";
+let status, select, backendReady;
 function settings() {
   const store = SillyTavern.getContext().extensionSettings;
   store[PLUGIN_ID] ??= { mode: "off", unicodeInput: false };
@@ -12,14 +25,25 @@ function settings() {
 function mode() { return MODES.includes(settings().mode) ? settings().mode : "off"; }
 function showStatus(text = "") {
   if (!status) return;
+  // A failed version check stays visible until a later check succeeds.
+  if (!text && backendReady === false) text = backendWarning;
   status.textContent = text;
   status.hidden = !text;
 }
 function updateStatus(result) {
-  const errors = { unicode_floor_required: "找不到真实用户楼层，已停止发送。请先输入消息，或关闭 Unicode 转码。",
-    unicode_input_too_large: "转码后的请求超过大小限制，已停止发送。请缩短输入或关闭 Unicode 转码。" };
-  showStatus(result.error ? errors[result.error] || `请求失败（${result.error}）。请查看酒馆错误提示；未自动重试。`
-    : result.unicode ? ({ encoded: "已对当前用户楼层的匹配文本转码。", "floor-not-found": "未匹配到用户楼层原文，按原文发送。", "no-encodable-text": "当前楼层没有需要转码的字符。" }[result.unicode.reason] || "") : "");
+  if (result.error) {
+    const code = result.status ? `${result.error}，HTTP ${result.status}` : result.error;
+    const cause = result.bypass ? `原因：${reasons[result.bypass] ?? result.bypass}。` : "";
+    return showStatus((errors[result.error] || `请求失败（${code}）。请查看酒馆错误提示；未自动重试。`) + cause);
+  }
+  const unicode = result.unicode ? { encoded: "已对当前用户楼层的匹配文本转码。", "floor-not-found": "未匹配到用户楼层原文，按原文发送。", "no-encodable-text": "当前楼层没有需要转码的字符。" }[result.unicode.reason] || "" : "";
+  const noText = result.image?.mode === "current-turn"
+    ? "图片·当前轮：最后一条 AI 消息之后没有可转换的文本（如点击“继续”或以 AI 消息结尾的预填充），本次按原文发送。"
+    : "图片·全部会话：没有可转换的文本，本次按原文发送。";
+  const image = result.image ? { encoded: `已将文本转为图片发送${result.image.pages ? `（${result.image.pages} 页）` : ""}。`,
+    "no-text": noText + (result.image.stream && result.mode !== "buffered" ? "图片输入请求仍按非流式交付。" : "") }[result.image.reason] || "" : "";
+  const bypass = result.bypass && result.bypass !== "disabled" ? `本次使用普通 Vertex：${reasons[result.bypass] ?? result.bypass}。` : "";
+  showStatus([unicode, image, bypass].filter(Boolean).join(" "));
 }
 
 async function checkBackend(silent = false) {
@@ -28,10 +52,13 @@ async function checkBackend(silent = false) {
     const response = await fetch(`${PLUGIN_PATH}/status`, { headers: context.getRequestHeaders(), signal: AbortSignal.timeout(5000) });
     const data = response.ok ? await response.json() : null;
     if (data?.id !== PLUGIN_ID || data?.version !== PLUGIN_VERSION) throw new Error();
+    backendReady = true;
     showStatus(silent ? "" : "服务端插件已就绪。");
   } catch {
-    showStatus("服务端插件未就绪或版本不匹配。安装配套服务端插件并重启酒馆，然后重新检查。");
+    backendReady = false;
+    showStatus();
   }
+  return backendReady;
 }
 
 function mount() {
@@ -95,7 +122,9 @@ function mount() {
     window.fetch = createFetchInterceptor(window.fetch.bind(window), { origin: location.origin, getMode: mode,
       getImageInput: () => settings().imageInput || "off",
       getUnicodeInput: () => settings().unicodeInput === true,
-      getUserFloor: () => latestUserFloor(SillyTavern.getContext().chat), onStatus: updateStatus });
+      getUserFloor: () => latestUserFloor(SillyTavern.getContext().chat),
+      // Image input is refused until the server plugin version is confirmed.
+      ensureBackend: async () => backendReady || checkBackend(true), onStatus: updateStatus });
   }
   void checkBackend(true);
 }

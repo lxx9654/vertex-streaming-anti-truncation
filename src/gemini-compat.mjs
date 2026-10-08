@@ -3,6 +3,7 @@ import { createSseParser } from "./wire.mjs";
 export const MAX_RETRY_TEXT_BYTES = 192_000;
 const DEFAULT_RETRY_ERROR_MATCHES = ["The prompt could not be submitted"];
 const INSPECTION_BYTES = 64 * 1024;
+const ERROR_INSPECTION_MS = 5000;
 const geminiModel = model => /(?:^|\/)gemini-[a-z0-9._-]+(?:@[a-z0-9-]+)?$/i.test(model || "");
 
 // Only plain text prefills can change roles without corrupting tool/thought history.
@@ -73,6 +74,9 @@ async function inspectSubmissionError(response, stream, matches) {
   if (!response.body) return { response, failure: false };
   const sse = response.ok && stream && /text\/event-stream/i.test(response.headers.get("content-type") || "");
   const reader = response.body.getReader();
+  // A stalled error body must not hold the provider status until the request deadline;
+  // cancelling ends the read, and the bytes that arrived are inspected as the whole body.
+  const timer = response.ok ? null : setTimeout(() => reader.cancel().catch(() => {}), ERROR_INSPECTION_MS);
   const held = [];
   let bytes = 0, ended = false, decided = false, failure = null;
   const parser = sse && createSseParser(({ data, event }) => {
@@ -122,7 +126,13 @@ async function inspectSubmissionError(response, stream, matches) {
     return { response: forwarded, failure: Boolean(failure) };
   } catch (error) {
     await reader.cancel().catch(() => {});
+    // A broken error body must not hide the provider status or its headers.
+    if (!response.ok) {
+      return { response: new Response(null, { status: response.status, statusText: response.statusText, headers: response.headers }), failure: false };
+    }
     throw error;
+  } finally {
+    clearTimeout(timer);
   }
 }
 

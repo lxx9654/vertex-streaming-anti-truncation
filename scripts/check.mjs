@@ -15,12 +15,23 @@ async function walk(dir) {
   return result;
 }
 const files = await walk(root);
-const privateKey = new RegExp("-----BEGIN " + "(?:RSA |EC |OPENSSH )?PRIVATE KEY-----");
+const leaks = [
+  new RegExp("-----BEGIN " + "(?:RSA |EC |OPENSSH |ENCRYPTED )?PRIVATE KEY-----"),
+  // ya29. is a Google OAuth access token (VERTEX_ACCESS_TOKEN).
+  /(?:ghp_|github_pat_|AIza|sk-proj-|ya29\.)[A-Za-z0-9_-]{20,}/,
+  // Service-account JSON fields and the camelCase secret fields of settings.json.
+  /"(?:private_key(?:_id)?|access_token|refresh_token|accessToken|apiKey|gatewayKey|serviceAccountJson)"\s*:\s*"[^"\n]+"/,
+  // A service-account email names its project. Starting at "@" keeps long word runs linear.
+  /@[\w-]+\.iam\.gserviceaccount\.com/i,
+  // Gateway keys from the console and the README recipe are 32 random bytes in hex.
+  /(?<![A-Za-z0-9])[a-f0-9]{64}(?![A-Za-z0-9])/i,
+  // User profile paths, also JSON-escaped and in Git Bash/WSL form (/c/Users/<name>).
+  // Placeholders that start with <, %, $ or { are allowed.
+  /(?:[A-Z]:|\/[a-z])[\\/]+Users[\\/]+[^\\/\s"'<>%${]+/i,
+];
 for (const file of files) {
   const text = await fs.readFile(file, "utf8");
-  if (privateKey.test(text) || /(?:ghp_|github_pat_|AIza|sk-proj-)[A-Za-z0-9_-]{20,}/.test(text) ||
-      /"(?:private_key|access_token|refresh_token)"\s*:\s*"[^"\n]+"/.test(text) ||
-      /[A-Z]:[\\/]Users[\\/][A-Za-z0-9_-]+[\\/]/i.test(text)) {
+  if (leaks.some(pattern => pattern.test(text))) {
     throw new Error("Potential credential/private path in " + path.relative(root, file));
   }
   if (/\.(mjs|js)$/.test(file)) {

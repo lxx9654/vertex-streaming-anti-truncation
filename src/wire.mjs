@@ -5,6 +5,35 @@ export const protocolError = code => Object.assign(new Error(code), { code, prot
 // Translated native usage and the compatible endpoint report the served tier in different places.
 export const trafficType = usage => usage?.traffic_type ?? usage?.extra_properties?.google?.traffic_type;
 export const sseData = value => `data: ${typeof value === "string" ? value : JSON.stringify(value)}\n\n`;
+// Provider codes such as PERMISSION_DENIED or MALFORMED_FUNCTION_CALL; anything else is dropped.
+export const enumToken = value => typeof value === "string" && /^[A-Z][A-Z0-9_]{0,63}$/.test(value) ? value : null;
+
+const redactions = [
+  [/<[^>]*>/g, " "],
+  [/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g, "[email]"],
+  [/\b(?:Bearer\s+)?(?:ya29\.|AIza)[\w.-]{16,}/g, "[key]"],
+  [/[\w+=-]{40,}/g, "[token]"],
+];
+// A Google error envelope (native, or the compatible endpoint's one-element array) reduced
+// to fixed fields: the google.rpc status, the ErrorInfo reason and error.message with markup,
+// emails, keys, long tokens and the given secret removed, capped at 240 characters.
+export function googleErrorDetail(body, secret) {
+  const error = (Array.isArray(body) ? body[0] : body)?.error;
+  if (!isObject(error)) return null;
+  const info = Array.isArray(error.details) ? error.details.find(item => item?.["@type"] === "type.googleapis.com/google.rpc.ErrorInfo") : null;
+  let message = typeof error.message === "string" ? error.message : "";
+  if (secret) message = message.split(secret).join("[key]");
+  for (const [pattern, replacement] of redactions) message = message.replace(pattern, replacement);
+  message = message.replace(/[\s\u0000-\u001f\u007f]+/g, " ").trim();
+  if (message.length > 240) message = message.slice(0, 239).replace(/[\ud800-\udbff]$/, "") + "…";
+  const detail = { status: enumToken(error.status), reason: enumToken(info?.reason), message: message || null };
+  return detail.status || detail.reason || detail.message ? detail : null;
+}
+// Logs and events keep only the two codes, never the message.
+export function upstreamErrorLogFields(value) {
+  const status = enumToken(value?.status), reason = enumToken(value?.reason);
+  return status || reason ? { upstreamError: { status, reason } } : {};
+}
 
 // Splits an SSE body into events. onEvent receives every event, comment-only ones
 // included, as { raw, lines, data, event }; data joins the event's data lines.

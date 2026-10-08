@@ -1,5 +1,5 @@
 import { assertStructuredOutput } from "./vertex-schema.mjs";
-import { createSseParser, isObject, protocolError } from "./wire.mjs";
+import { createSseParser, enumToken, isObject, protocolError } from "./wire.mjs";
 // Protocol validation retains bounded SSE events and fixed metadata, never reply text for logs.
 const reasons = new Set(["stop", "length", "content_filter", "tool_calls", "function_call"]);
 const outcomes = new Set(["complete", "length", "content_filter", "tool_calls", "incomplete", "empty", "error", "cancelled"]);
@@ -9,6 +9,8 @@ export function integrityLogFields(value) {
   return { responseIntegrity: {
     outcome: outcomes.has(value.outcome) ? value.outcome : "incomplete",
     finishReason: reasons.has(value.finishReason) ? value.finishReason : null,
+    // Google's own ending (for example MALFORMED_FUNCTION_CALL) on native routes.
+    nativeFinishReason: enumToken(value.nativeFinishReason),
     streamDone: typeof value.streamDone === "boolean" ? value.streamDone : null,
     hasContent: value.hasContent === true,
     hasToolCalls: value.hasToolCalls === true,
@@ -28,7 +30,10 @@ function flags(message) {
 }
 function summary(states, streamDone = null) {
   const values = [...states];
-  const merged = { outcome: "complete", finishReason: values[0]?.finishReason ?? null, streamDone,
+  // Prefer the native code of a choice whose ending was not accepted.
+  const native = values.find(value => value.nativeFinishReason != null && !reasons.has(value.finishReason)) ?? values[0];
+  const merged = { outcome: "complete", finishReason: values[0]?.finishReason ?? null,
+    nativeFinishReason: native?.nativeFinishReason ?? null, streamDone,
     hasContent: false, hasToolCalls: false, hasReasoning: false, hasRefusal: false };
   for (const value of values) for (const key of ["hasContent", "hasToolCalls", "hasReasoning", "hasRefusal"]) merged[key] ||= value[key];
   if (values.some(value => value.finishReason === "length")) merged.outcome = "length";
@@ -53,7 +58,7 @@ export function inspectCompletion(completion) {
   const states = [];
   for (const choice of completion.choices) {
     if (!isObject(choice)) return invalid("invalid_choice");
-    const state = { ...flags(isObject(choice.message) ? choice.message : null), finishReason: choice.finish_reason };
+    const state = { ...flags(isObject(choice.message) ? choice.message : null), finishReason: choice.finish_reason, nativeFinishReason: choice.native_finish_reason };
     if (choice.message == null) return invalid(isObject(choice.delta) ? "unexpected_stream_chunk" : "missing_message", state);
     if (!isObject(choice.message)) return invalid("invalid_message", state);
     const problem = choiceProblem(state);
@@ -152,6 +157,8 @@ export function guardCompletionStream(response, onMetadata = () => {}, expectati
       if (state.finishReason != null && (Object.values(incoming).some(Boolean) || choice.finish_reason != null)) fail("data_after_finish");
       for (const key of Object.keys(incoming)) state[key] ||= incoming[key];
       if (choice.finish_reason != null) {
+        if (choice.native_finish_reason != null) state.nativeFinishReason = choice.native_finish_reason;
+        states.set(index, state);
         if (!reasons.has(choice.finish_reason)) fail("invalid_finish_reason");
         state.finishReason = choice.finish_reason;
       }

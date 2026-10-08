@@ -83,6 +83,11 @@ export function vertexAccessToken(serviceAccountJson, timeoutMs = 10_000) {
         return minted.token;
       })
       .catch((error) => {
+        // A refresh starts 5 minutes early; if it fails, keep using the still-valid token.
+        if (cached?.token && cached.expiresAt > Date.now()) {
+          tokenCache.set(serviceAccountJson, cached);
+          return cached.token;
+        }
         tokenCache.delete(serviceAccountJson);
         throw error;
       }),
