@@ -2,6 +2,17 @@
 
 [中文](CHANGELOG.zh-CN.md) | English
 
+## SillyTavern integration 0.3.1
+
+The standalone gateway stays at 0.7.0. Tag `sillytavern-v0.3.1`.
+
+- Tavern Continue requests use a suffix-only transport instruction with Continue prefill on or off, buffered or streaming anti-truncation, and image input. Existing messages and Tavern's continuation nudge are preserved, and Tavern still appends the reply. No automatic retry or additional model turn is introduced.
+- Fix streaming anti-truncation arriving all at once in Tavern. Tavern's global `compression()` compressed the plugin's `text/event-stream` reply and held it until the end; streamed replies now send `Cache-Control: no-store, no-transform`, so text reaches the page as Vertex produces it. All earlier plugin versions are affected.
+- Continuation is identified by `type: "continue"`, not by an assistant-role preset. Ordinary requests and tool/Schema bypasses keep their behavior. Both plugin halves must match; the panel reports adaptation after the server confirms it.
+- New one-step package: `npm run package:sillytavern` now includes an installer (double-click `install-windows.cmd` on Windows, `sh install.sh` elsewhere). One run places the server plugin and UI extension, installs the image renderer, and enables server plugins in `config.yaml` after backing it up. It stops without overwriting or deleting anything when it finds a Git or manual copy. Covered by temporary-directory tests and one install-and-update run with `npm ci` against a simulated Tavern folder; not yet installed into a real Tavern.
+- Passed 183 local tests and 60 offline cases using Tavern's actual prompt converter. Six live Gemini 3.7 Flash / Standard requests through an isolated backend reused Tavern's credentials: every suffix matched exactly without repeating the prefix, and both native streams delivered seven content chunks. Tavern's configuration, credentials and settings files stayed unchanged. This short-text check does not establish open-ended or long-context continuation quality; live Tavern page interaction remains unverified.
+- The streaming fix was reproduced with Tavern's own `express` and `compression()` and a simulated upstream sending ten pieces over 3 seconds: before the fix the reply arrived in one read after 3.2 seconds, after it in 11 reads starting at 26 ms. Installed into a running SillyTavern 1.19.0, the plugin reports 0.3.1 ready. A real Vertex reply streaming in the Tavern page has not been observed yet.
+
 ## 0.7.0 (experimental)
 
 Fixes and refinements after 0.6.0. The SillyTavern plugin stays at 0.3.0 (tag `sillytavern-v0.3.0`).

@@ -8,7 +8,7 @@ const reasons = { "existing-tools": "已有工具调用", "structured-output": "
   model: "此模型不适用", "too-large": "请求超过 8 MiB" };
 const errors = { unicode_floor_required: "找不到真实用户楼层，已停止发送。请先输入消息，或关闭 Unicode 转码。",
   unicode_input_too_large: "转码后的请求超过大小限制，已停止发送。请缩短输入或关闭 Unicode 转码。",
-  plugin_not_ready: "服务端插件未就绪或版本不匹配，图片输入已停止发送，未改用明文。请更新服务端插件并重启酒馆。",
+  plugin_not_ready: "服务端插件未就绪或版本不匹配，本次请求已停止发送。请同时更新前后端插件并重启酒馆。",
   image_input_requires_supported_request: "图片输入不支持此请求，已停止发送，未改用明文。请去掉不支持的内容或换用支持的模型，或关闭图片输入。",
   image_input_unsupported_characters: "图片输入不支持 emoji、控制字符或字体缺字，已停止发送。请删除这些字符，或改用“图片·当前轮”/关闭图片输入。",
   image_input_too_large: "转成图片后超过大小或页数限制，已停止发送。请缩短对话，或改用“图片·当前轮”。",
@@ -43,7 +43,8 @@ function updateStatus(result) {
   const image = result.image ? { encoded: `已将文本转为图片发送${result.image.pages ? `（${result.image.pages} 页）` : ""}。`,
     "no-text": noText + (result.image.stream && result.mode !== "buffered" ? "图片输入请求仍按非流式交付。" : "") }[result.image.reason] || "" : "";
   const bypass = result.bypass && result.bypass !== "disabled" ? `本次使用普通 Vertex：${reasons[result.bypass] ?? result.bypass}。` : "";
-  showStatus([unicode, image, bypass].filter(Boolean).join(" "));
+  const continuation = result.continuation ? "本次“继续”已请求仅生成新增续文，由酒馆追加到原消息。" : "";
+  showStatus([unicode, image, bypass, continuation].filter(Boolean).join(" "));
 }
 
 async function checkBackend(silent = false) {
@@ -123,7 +124,7 @@ function mount() {
       getImageInput: () => settings().imageInput || "off",
       getUnicodeInput: () => settings().unicodeInput === true,
       getUserFloor: () => latestUserFloor(SillyTavern.getContext().chat),
-      // Image input is refused until the server plugin version is confirmed.
+      // Image input and Continue require a matching server plugin.
       ensureBackend: async () => backendReady || checkBackend(true), onStatus: updateStatus });
   }
   void checkBackend(true);

@@ -6,6 +6,29 @@ Local fixtures, live standalone requests and historical router checks cover diff
 
 ## Standalone package
 
+### SillyTavern integration 0.3.1: Continue support, streaming fix and one-step installer (2026-10-09)
+
+At release, `npm run verify` passes 93 release-file checks and 183 local tests. New fixtures cover explicit `type: "continue"`, both prefill and continuation-nudge request shapes, ordinary assistant prefills staying unchanged, refusal when the plugin version is not ready, retained Unicode status, and a single upstream call across streaming, buffered and image modes. Simulated replies verify unchanged suffix delivery, progressive arrival, preserved reasoning and usage, honest length endings and no retry on 429.
+
+An additional 60 offline cases use the locally installed Tavern's actual `postProcessPrompt`, `convertGooglePrompt` and budget conversion code: three Gemini model IDs, none/merge/strict/single processing, system-prompt on/off, prefill/nudge forms, and image/Unicode paths. The original request stays unchanged, existing text remains in context, and the final user instruction requests only the continuation. All-conversation image mode does not reinsert plaintext to locate the continuation.
+
+Six subsequent live requests used the saved Tavern service account with Gemini 3.7 Flash, global, Standard tier, and a 1024-output-token cap per request. An isolated loopback HTTP backend loaded the changed plugin and Tavern's actual converter. Each fixture supplied a Chinese passage and an existing prefix ending mid-sentence. All six returned HTTP 200 with an exact suffix, no repeated prefix, a `STOP`/`stop` ending and exactly one upstream submission.
+
+| Request | Client response | Observed result |
+| --- | --- | --- |
+| Continue prefill + buffered anti-truncation | JSON | Restored, suffix only |
+| Continuation nudge + buffered anti-truncation | Buffered SSE | Restored, one DONE |
+| Continue prefill + streaming anti-truncation | Native stream adapted to SSE | 7 content reads; first at about 1777 ms, content span 545 ms |
+| Continuation nudge + streaming anti-truncation | Native stream adapted to SSE | 7 content reads; first at about 1728 ms, content span 553 ms |
+| Current-turn image + anti-truncation off | Buffered SSE | No eligible text to render; original text sent with the continuation instruction, one DONE |
+| All-conversation image + buffered anti-truncation | JSON | Actual image input, restored, suffix only |
+
+Reported usage totaled 4480 input, 1086 output-text and 1165 thinking tokens, or 6731 tokens overall. SHA-256 checks of Tavern's `config.yaml`, user `settings.json` and `secrets.json` matched before and after. No Tavern installation, restart or chat mutation occurred. These short completion fixtures establish transport compatibility, not open-ended story quality, long-context continuity or overall repetition rates. Live Tavern page interaction remains unverified.
+
+**Streaming fix.** With streaming anti-truncation enabled in a real Tavern, replies still appeared all at once when generation finished. Tavern's global `compression()` compressed the plugin's `text/event-stream` reply and emitted output only when its buffer filled or the reply ended; the six live requests above used a temporary backend without compression, so they did not expose this. With the plugin mounted on Tavern's own `express` and `compression()`, a simulated upstream sending ten pieces over 3 seconds, and a client sending `Accept-Encoding: gzip, deflate, br, zstd`: before the fix the reply was brotli-compressed and read once at 3.2 seconds; with `Cache-Control: no-store, no-transform` on streamed replies it was not compressed and arrived in 11 reads from 26 ms to 3.1 seconds. The installed 0.3.0 copy reproduced the same failure. A regression test checks for `no-transform` on streamed replies.
+
+**Installation and loading.** Both 0.3.1 halves were placed into the existing manual and Git copies of a local SillyTavern 1.19.0; after a restart, `/api/plugins/vertex-anti-truncation/status` reported 0.3.1 ready. A real Vertex long reply streaming in the Tavern page has not been observed yet. The one-step installer is covered by temporary-directory tests and one install-and-update run with `npm ci` against a simulated Tavern folder; it has not been run on a real Tavern.
+
 ### Unreleased fixes and refinements (2026-10-07 to 10-08)
 
 At the time of writing, the working tree passes 176 local tests with `node --test test/*.test.mjs` and 88 release-file checks with `node scripts/check.mjs`. Every test uses port 0, a temporary state directory, dummy credentials and a simulated upstream; no real Google, proxy, browser or SillyTavern call was made. New fixtures cover the fields and redaction of provider error details (including the request's own credential, and stream error events from both the compatible and native endpoints), a stalled error body returning the provider status after about 5 seconds with prompt retry on or off, the first save signing out other sessions opened with the setup link, line wrapping that stays inside the page, and WebP page output. In a scratch copy, removing the two error-body timers made the stalled-body fixture time out, and restoring the earlier summed-width line wrapping let ink reach x=1023, past the 988px text edge, so the line-wrapping fixture failed.

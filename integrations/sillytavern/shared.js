@@ -1,6 +1,6 @@
 import { prepareUnicodeInput } from "../../src/unicode-input.mjs";
 export const PLUGIN_ID = "vertex-anti-truncation";
-export const PLUGIN_VERSION = "0.3.0";
+export const PLUGIN_VERSION = "0.3.1";
 export const MODES = ["off", "buffered", "streaming"];
 export const GENERATE_PATH = "/api/backends/chat-completions/generate";
 export const PLUGIN_PATH = `/api/plugins/${PLUGIN_ID}`;
@@ -66,8 +66,6 @@ export function createFetchInterceptor(originalFetch, { origin, getMode, getUnic
     let reason = bypassReason(body, imageEnabled && mode === "off" ? "buffered" : mode);
     if (imageEnabled) {
       if (!["current-turn", "all"].includes(imageMode) || reason) { onStatus({ error: "image_input_requires_supported_request", bypass: reason }); throw new Error("image_input_requires_supported_request"); }
-      // An older server plugin ignores the image field and would send plaintext.
-      if (!await ensureBackend()) { onStatus({ error: "plugin_not_ready" }); throw new Error("plugin_not_ready"); }
       body.vertex_image_input = imageMode;
     }
     let payload = reason ? null : JSON.stringify({ ...body, vertex_anti_truncation: mode });
@@ -75,6 +73,11 @@ export function createFetchInterceptor(originalFetch, { origin, getMode, getUnic
     // anti-truncation. Image input never falls back to plaintext.
     if (payload && !imageEnabled && new TextEncoder().encode(payload).length > BODY_LIMIT) reason = "too-large";
     if (reason && !unicodeEnabled) { onStatus({ bypass: reason }); return originalFetch(input, init); }
+    // Old plugins ignore image settings and Continue semantics. Check only
+    // eligible plugin requests; disabled/bypass routes retain ST's behavior.
+    if (!reason && (imageEnabled || body.type === "continue") && !await ensureBackend()) {
+      onStatus({ error: "plugin_not_ready" }); throw new Error("plugin_not_ready");
+    }
     onStatus({ mode, bypass: reason, unicode });
     if (reason) payload = JSON.stringify(body);
     const target = reason ? url.href : new URL(`${PLUGIN_PATH}/generate`, origin).href;
@@ -96,11 +99,14 @@ export function createFetchInterceptor(originalFetch, { origin, getMode, getUnic
       // Plugin errors carry a fixed code; ST's own route keeps the HTTP status.
       const code = reason ? undefined : await response.clone().json().then(data => data?.error?.code, () => undefined);
       onStatus(typeof code === "string" && code ? { error: code, status: response.status } : { error: response.status });
-    } else if (imageEnabled) {
+    } else if (!reason && (imageEnabled || body.type === "continue")) {
       // The plugin reports whether any text was converted; "no-text" was sent as plain text.
       // stream says whether ST asked to stream, since the plugin buffers every image request.
-      onStatus({ mode, image: { mode: imageMode, reason: response.headers.get("x-image-input"),
-        pages: Number(response.headers.get("x-image-input-pages")) || 0, stream: body.stream === true } });
+      onStatus({ mode,
+        ...(unicode ? { unicode } : {}),
+        ...(response.headers.get("x-vertex-continuation") === "suffix" ? { continuation: true } : {}),
+        ...(imageEnabled ? { image: { mode: imageMode, reason: response.headers.get("x-image-input"),
+          pages: Number(response.headers.get("x-image-input-pages")) || 0, stream: body.stream === true } } : {}) });
     }
     // Never resubmit to the original route after a failed plugin request.
     return response;

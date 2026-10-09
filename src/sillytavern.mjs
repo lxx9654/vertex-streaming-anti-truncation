@@ -1,4 +1,4 @@
-import { prepareAntiTruncation, restoreAntiTruncationCompletion, wrapAntiTruncationStream } from "./anti-truncation.mjs";
+import { CONTINUATION_INSTRUCTION, prepareAntiTruncation, restoreAntiTruncationCompletion, wrapAntiTruncationStream } from "./anti-truncation.mjs";
 import { nativeRequestBody } from "./vertex-native.mjs";
 import { translateNativeCompletion } from "./vertex-protocol.mjs";
 import { wrapNativeTextStream } from "./vertex-text-stream.mjs";
@@ -32,7 +32,15 @@ export function prepareSillyTavernRequest(request, adapters) {
   if (body.custom_prompt_post_processing) {
     messages = adapters.postProcessPrompt(messages, body.custom_prompt_post_processing, adapters.getPromptNames(request));
   }
-  const prepared = prepareAntiTruncation({ messages }, mode !== "off");
+  // ST identifies Continue explicitly, with either a final assistant prefill or
+  // its own continuation nudge. Do not infer it from an assistant-role preset.
+  // Add this after prompt processing and image conversion so the instruction
+  // stays readable and the existing message remains unchanged in its context.
+  const continuation = body.type === "continue";
+  const prepared = prepareAntiTruncation({ messages }, mode !== "off", false, { continuation });
+  if (continuation && !prepared.toolName) {
+    prepared.payload = { ...prepared.payload, messages: [...messages, { role: "user", content: CONTINUATION_INSTRUCTION }] };
+  }
   const useSystemPrompt = Boolean(body.use_sysprompt);
   const prompt = adapters.convertGooglePrompt(prepared.payload.messages, body.model, useSystemPrompt, adapters.getPromptNames(request));
   const native = nativeRequestBody({ ...prepared.payload, messages: [] });
@@ -57,7 +65,7 @@ export function prepareSillyTavernRequest(request, adapters) {
   }
   const upstreamStream = mode === "streaming" && body.stream === true && !(body.vertex_image_input && body.vertex_image_input !== "off");
   if (upstreamStream) native.toolConfig.functionCallingConfig.streamFunctionCallArguments = true;
-  return { body: native, toolName: prepared.toolName, model: body.model, stream: body.stream === true, upstreamStream, mode };
+  return { body: native, toolName: prepared.toolName, model: body.model, stream: body.stream === true, upstreamStream, mode, continuation };
 }
 
 const finishReasons = { stop: "STOP", length: "MAX_TOKENS", content_filter: "SAFETY" };
