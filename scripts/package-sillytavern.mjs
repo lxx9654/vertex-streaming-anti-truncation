@@ -11,6 +11,8 @@ const frontend = ["src/unicode-input.mjs", "manifest.json", "integrations/sillyt
 const backend = ["package.json", "package-lock.json", "assets/fonts/NotoSansCJKsc-Regular.otf", "assets/fonts/OFL.txt", "integrations/sillytavern/server.mjs", "integrations/sillytavern/shared.js",
   ...(await readdir(path.join(root, "src"))).filter(file => file.endsWith(".mjs")).map(file => `src/${file}`)];
 const notices = ["LICENSE", "NOTICE.md", "LICENSES/Antigravity-gateway-MIT.txt", "docs/SILLYTAVERN.md"];
+// Placed at the package root so users can run the installer directly.
+const installer = ["install.mjs", "install-windows.cmd", "install.sh", "README.txt"];
 // Only replace generated directories immediately beneath this repository's real
 // dist directory. Refuse links/junctions before any recursive removal on Windows.
 async function verifyGeneratedDirectory(directory) {
@@ -35,6 +37,10 @@ try {
       hashes[`${kind}/${name}/${file}`] = createHash("sha256").update(await readFile(target)).digest("hex");
     }
   }
+  for (const file of installer) {
+    await copyFile(path.join(root, "integrations/sillytavern/installer", file), path.join(staging, file));
+    hashes[file] = createHash("sha256").update(await readFile(path.join(staging, file))).digest("hex");
+  }
   await writeFile(path.join(staging, "SHA256.json"), JSON.stringify(hashes, null, 2) + "\n");
   await verifyGeneratedDirectory(output);
   await rm(output, { recursive: true, force: true });
@@ -43,4 +49,4 @@ try {
   await verifyGeneratedDirectory(staging);
   await rm(staging, { recursive: true, force: true });
 }
-console.log(`SillyTavern server plugin and UI extension packaged in ${output}`);
+console.log(`SillyTavern server plugin, UI extension and installer packaged in ${output}`);
