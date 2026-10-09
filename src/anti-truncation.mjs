@@ -7,6 +7,8 @@ const auditTransports = new Set(["disabled", "existing-tools", "tool-choice", "s
     "tool-history", "tool-transport", "tool-transport-buffered", "tool-transport-buffered-fields", "tool-transport-native-streaming"]);
 const auditFinishReasons = new Set(["stop", "length", "content_filter", "tool_calls", "function_call"]);
 
+export const CONTINUATION_INSTRUCTION = "Follow the existing continuation context and extend the message being continued from its exact end. Output only the new text to append; do not repeat, summarize, rewrite or restart the existing text. Preserve its language, point of view, formatting and any unfinished sentence or markup. Do not add a preamble, continuation label, speaker prefix or enclosing quotes unless they belong to the continuation itself.";
+
 // Only fixed status metadata may reach logs/admin events. Unknown is distinct
 // from false, and snapshots must not change when the next retry updates its audit.
 export function antiTruncationLogFields(metadata) {
@@ -21,7 +23,7 @@ export function antiTruncationLogFields(metadata) {
 
 // Opt-in transport for text replies. Existing client tools (including Tavern
 // Helper's transport), structured output and multi-candidate requests bypass it.
-export function prepareAntiTruncation(payload, enabled, streamArguments = false) {
+export function prepareAntiTruncation(payload, enabled, streamArguments = false, { continuation = false } = {}) {
     const skip = reason => ({ payload, toolName: null, reason });
     if (!enabled) return skip("disabled");
     if (payload.tools?.length || payload.functions?.length) return skip("existing-tools");
@@ -41,11 +43,11 @@ export function prepareAntiTruncation(payload, enabled, streamArguments = false)
             ...payload,
             messages: [...payload.messages, {
                 role: "user",
-                content: `Transport format for this reply: call ${toolName} exactly once. Put the entire user-visible answer in its content string, preserving all requested formatting, markup, language and sections. The function only transports text and performs no external action.`,
+                content: `Transport format for this reply: call ${toolName} exactly once. Put ${continuation ? "only the new continuation text" : "the entire user-visible answer"} in its content string, preserving all requested formatting, markup, language and sections. The function only transports text and performs no external action.${continuation ? "\n" + CONTINUATION_INSTRUCTION : ""}`,
             }],
             tools: [{ type: "function", function: {
                 name: toolName,
-                description: "Deliver the complete user-visible reply as text.",
+                description: continuation ? "Deliver only the new continuation text to append to the existing message." : "Deliver the complete user-visible reply as text.",
                 parameters: { type: "object", properties: { content: { type: "string" } }, required: ["content"], additionalProperties: false },
             } }],
             tool_choice: { type: "function", function: { name: toolName } },

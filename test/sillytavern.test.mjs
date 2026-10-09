@@ -6,6 +6,7 @@ import { prepareSillyTavernRequest, restoreSillyTavernResponse } from "../src/si
 import { createGenerateHandler, connectionForRequest } from "../integrations/sillytavern/server.mjs";
 import { createFetchInterceptor, bypassReason, BODY_LIMIT, GENERATE_PATH, PLUGIN_PATH } from "../integrations/sillytavern/shared.js";
 import { sseData } from "../src/wire.mjs";
+import { CONTINUATION_INSTRUCTION } from "../src/anti-truncation.mjs";
 
 const body = { chat_completion_source: "vertexai", model: "gemini-3-flash-preview", stream: true,
   vertex_anti_truncation: "streaming", vertexai_auth_mode: "express", vertexai_region: "global", vertexai_service_tier: "flex",
@@ -86,6 +87,97 @@ test("SillyTavern preserves prompt conversion and parameters without modifying t
   assert.ok(processed);
 });
 
+test("Continue requests append a suffix instruction after processing, for prefill and nudge prompts", () => {
+  const prefix = { role: "assistant", name: "角色", content: "<正文>他推开门，看到" };
+  for (const nudge of [false, true]) for (const mode of ["buffered", "streaming"]) {
+    const messages = [...body.messages, prefix, ...(nudge ? [{ role: "system", content: "继续最后一条消息，不要重复已有内容。" }] : [])];
+    const input = request({ type: "continue", messages, vertex_anti_truncation: mode, custom_prompt_post_processing: "merge" });
+    const before = structuredClone(input);
+    let processed = false;
+    const prepared = prepareSillyTavernRequest(input, { ...adapters,
+      postProcessPrompt(received) {
+        assert.deepEqual(received, messages);
+        processed = true;
+        return received;
+      },
+      convertGooglePrompt(received) {
+        assert.ok(processed);
+        assert.deepEqual(received.slice(0, -1), messages);
+        assert.equal(received.length, messages.length + 1);
+        assert.equal(received.at(-1).role, "user");
+        assert.match(received.at(-1).content, /Put only the new continuation text/);
+        assert.ok(received.at(-1).content.endsWith(CONTINUATION_INSTRUCTION));
+        assert.ok(!received.at(-1).content.includes(prefix.content));
+        return adapters.convertGooglePrompt(received);
+      },
+    });
+    assert.deepEqual(input, before);
+    assert.equal(prepared.continuation, true);
+    assert.equal(prepared.upstreamStream, mode === "streaming");
+    assert.match(prepared.body.tools[0].functionDeclarations[0].description, /only the new continuation/);
+    assert.equal(prepared.body.contents.at(-1).role, "user");
+  }
+  // An assistant prefill in an ordinary preset is not a Continue operation.
+  for (const type of [undefined, "normal", "swipe", "regenerate", "quiet", "impersonate"]) {
+    const prepared = prepareSillyTavernRequest(request({ type, messages: [...body.messages, prefix] }), adapters);
+    assert.equal(prepared.continuation, false);
+    assert.match(prepared.body.contents.at(-1).parts[0].text, /Put the entire user-visible answer/);
+    assert.ok(!JSON.stringify(prepared.body).includes(CONTINUATION_INSTRUCTION));
+  }
+});
+
+test("Continue checks plugin readiness only on eligible requests and reports server-confirmed adaptation", async () => {
+  const calls = [], statuses = [];
+  let ready = false, checks = 0, mode = "streaming";
+  const intercept = createFetchInterceptor(async (...args) => {
+    calls.push(args);
+    return new Response("OK", { headers: { "x-vertex-continuation": "suffix" } });
+  }, { origin: "http://localhost", getMode: () => mode,
+    ensureBackend: async () => { checks++; return ready; }, onStatus: s => statuses.push(s) });
+  const data = { ...body, type: "continue", messages: [...body.messages, { role: "assistant", content: "已有正文" }] };
+  const init = { method: "POST", body: JSON.stringify(data) };
+  await assert.rejects(intercept(GENERATE_PATH, init), /plugin_not_ready/);
+  assert.equal(calls.length, 0);
+  assert.deepEqual(statuses.at(-1), { error: "plugin_not_ready" });
+  ready = true;
+  await intercept(GENERATE_PATH, init);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], PLUGIN_PATH + "/generate");
+  assert.deepEqual(JSON.parse(calls[0][1].body), data);
+  assert.deepEqual(statuses.at(-1), { mode: "streaming", continuation: true });
+  assert.equal(checks, 2);
+  ready = false;
+  for (const patch of [{ tools: [{}] }, { json_schema: {} }, { enable_web_search: true }]) {
+    const bypass = { ...init, body: JSON.stringify({ ...data, ...patch }) };
+    await intercept(GENERATE_PATH, bypass);
+    assert.equal(calls.at(-1)[0], GENERATE_PATH);
+    assert.strictEqual(calls.at(-1)[1], bypass);
+  }
+  mode = "off";
+  await intercept(GENERATE_PATH, init);
+  assert.strictEqual(calls.at(-1)[1], init);
+  assert.equal(checks, 2);
+});
+
+test("Continue retains Unicode input status and does not claim adaptation without the server header", async () => {
+  const statuses = [];
+  let confirmed = false;
+  const intercept = createFetchInterceptor(async (_url, init) => {
+    const sent = JSON.parse(init.body);
+    assert.equal(sent.type, "continue");
+    assert.equal(sent.messages[1].content, "⟦U:4F60 597D⟧");
+    assert.equal(sent.messages.at(-1).content, "已有正文");
+    return new Response("OK", { headers: confirmed ? { "x-vertex-continuation": "suffix" } : {} });
+  }, { origin: "http://localhost", getMode: () => "buffered", getUnicodeInput: () => true,
+    getUserFloor: () => "你好", onStatus: value => statuses.push(value) });
+  for (confirmed of [false, true]) {
+    await intercept(GENERATE_PATH, { method: "POST", body: JSON.stringify({ ...body, type: "continue",
+      messages: [...body.messages, { role: "assistant", content: "已有正文" }] }) });
+    assert.equal(statuses.at(-1).unicode.reason, "encoded");
+    assert.equal(statuses.at(-1).continuation, confirmed ? true : undefined);
+  }
+});
+
 test("developer instructions remain system instructions through ST prompt processing", () => {
   const input = request({ messages: [{ role: "developer", content: "Follow this instruction." }, { role: "user", content: "Hello" }],
     custom_prompt_post_processing: "merge" });
@@ -137,8 +229,8 @@ test("SillyTavern credentials stay per-user and selected secret; destinations ca
   assert.throws(() => prepareSillyTavernRequest(request({ model: "../../private" }), adapters));
 });
 
-test("native partialArgs reach ST before completion with no synthetic tools or duplicate text", async () => {
-  const prepared = prepareSillyTavernRequest(request(), adapters);
+for (const type of ["normal", "continue"]) test(`native partialArgs reach ST before completion with no synthetic tools or duplicate text (${type})`, async () => {
+  const prepared = prepareSillyTavernRequest(request({ type, messages: [...body.messages, { role: "assistant", content: "已有正文" }] }), adapters);
   let upstreamController;
   const upstream = new Response(new ReadableStream({ start(controller) { upstreamController = controller; } }));
   const restored = await restoreSillyTavernResponse(upstream, prepared);
@@ -466,4 +558,74 @@ test("image requests report the plugin's conversion outcome, including text sent
   assert.ok(!JSON.stringify(sent.at(-1)).includes("data:image"));
   assert.deepEqual(await post({}), ["encoded", "1"]);
   assert.match(JSON.stringify(sent.at(-1)), /data:image\/(png|webp);base64,/);
+});
+
+test("Continue delivers only the upstream suffix in one request across stream, buffered and image modes", async t => {
+  const sent = [];
+  const suffix = "\n一道光。</正文>";
+  let finishReason = "STOP", upstreamStatus = 200;
+  const handler = createGenerateHandler(adapters, { fetchImpl: async (url, init) => {
+    const data = JSON.parse(init.body);
+    sent.push(data);
+    if (upstreamStatus !== 200) return new Response("busy", { status: upstreamStatus });
+    const instruction = data.contents.at(-1);
+    assert.equal(instruction.role, "user");
+    assert.ok(instruction.parts[0].text.endsWith(CONTINUATION_INSTRUCTION));
+    const name = data.tools?.[0]?.functionDeclarations[0]?.name;
+    const raw = { candidates: [{ content: { role: "model", parts: [
+      { text: "思考", thought: true },
+      name ? { functionCall: { name, args: { content: suffix } } } : { text: suffix },
+    ] }, finishReason }], usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5, totalTokenCount: 15 } };
+    return String(url).includes(":streamGenerateContent") ? new Response(sseData(raw)) : Response.json(raw);
+  } });
+  const server = http.createServer(async (req, res) => {
+    const chunks = []; for await (const chunk of req) chunks.push(chunk);
+    req.body = JSON.parse(Buffer.concat(chunks).toString()); req.user = { directories: {} };
+    const before = structuredClone(req.body);
+    res.status = value => { res.statusCode = value; return res; };
+    res.json = value => res.end(JSON.stringify(value));
+    await handler(req, res);
+    assert.deepEqual(req.body, before);
+  });
+  server.listen(0, "127.0.0.1"); await once(server, "listening");
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const post = extra => fetch(`http://127.0.0.1:${server.address().port}`, { method: "POST", body: JSON.stringify({
+    ...body, type: "continue", messages: [...body.messages, { role: "assistant", content: "<正文>他推开门，看到" }], ...extra,
+  }) });
+  for (const [mode, image] of [["streaming", "off"], ["buffered", "off"], ["off", "current-turn"], ["off", "all"], ["streaming", "all"]]) {
+    for (const stream of [false, true]) {
+      const count = sent.length;
+      const response = await post({ vertex_anti_truncation: mode, vertex_image_input: image, stream });
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get("x-vertex-continuation"), "suffix");
+      if (stream) {
+        const wire = await response.text();
+        assert.equal(contents(wire), suffix);
+        assert.equal(wire.split("data: [DONE]").length - 1, 1);
+        assert.ok(events(wire).some(event => event.candidates?.[0]?.finishReason === "STOP"));
+        assert.ok(events(wire).some(event => event.usageMetadata?.totalTokenCount === 15));
+      } else {
+        const result = await response.json();
+        assert.equal(result.choices[0].message.content, suffix);
+        assert.equal(result.choices[0].finish_reason, "stop");
+        assert.deepEqual(result.responseContent.parts, [{ thought: true, text: "思考" }, { text: suffix }]);
+        assert.equal(result.usageMetadata.totalTokenCount, 15);
+      }
+      assert.equal(sent.length, count + 1);
+      if (image === "current-turn") assert.equal(response.headers.get("x-image-input"), "no-text");
+      if (image === "all") assert.equal(response.headers.get("x-image-input"), "encoded");
+    }
+  }
+  finishReason = "MAX_TOKENS";
+  const limited = await post({});
+  const wire = await limited.text();
+  assert.equal(contents(wire), suffix);
+  assert.ok(events(wire).some(event => event.candidates?.[0]?.finishReason === "MAX_TOKENS"));
+  assert.ok(!events(wire).some(event => event.candidates?.[0]?.finishReason === "STOP"));
+  const count = sent.length;
+  upstreamStatus = 429;
+  const failed = await post({});
+  assert.equal(failed.status, 429);
+  assert.equal((await failed.json()).error.code, "vertex_upstream_http_error");
+  assert.equal(sent.length, count + 1);
 });

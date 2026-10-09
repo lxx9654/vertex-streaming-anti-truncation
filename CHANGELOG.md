@@ -2,6 +2,12 @@
 
 [中文](CHANGELOG.zh-CN.md) | English
 
+## Unreleased / SillyTavern integration 0.3.1
+
+- Tavern Continue requests use a suffix-only transport instruction with Continue prefill on or off, buffered or streaming anti-truncation, and image input. Existing messages and Tavern's continuation nudge are preserved, and Tavern still appends the reply. No automatic retry or additional model turn is introduced.
+- Continuation is identified by `type: "continue"`, not by an assistant-role preset. Ordinary requests and tool/Schema bypasses keep their behavior. Both plugin halves must match; the panel reports adaptation after the server confirms it.
+- Passed 181 local tests and 60 offline cases using Tavern's actual prompt converter. Six live Gemini 3.7 Flash / Standard requests through an isolated backend reused Tavern's credentials: every suffix matched exactly without repeating the prefix, and both native streams delivered seven content chunks. Tavern's configuration, credentials and settings files stayed unchanged. This short-text check does not establish open-ended or long-context continuation quality; live Tavern page interaction remains unverified.
+
 ## 0.7.0 (experimental)
 
 Fixes and refinements after 0.6.0. The SillyTavern plugin stays at 0.3.0 (tag `sillytavern-v0.3.0`).

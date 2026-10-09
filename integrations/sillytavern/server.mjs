@@ -69,6 +69,7 @@ export function createGenerateHandler(adapters, { fetchImpl = fetch, timeoutMs =
       response.setHeader("cache-control", "no-store");
       response.setHeader("x-content-type-options", "nosniff");
       response.setHeader("x-anti-truncation-transport", prepared.upstreamStream ? "native-streaming" : "buffered");
+      if (prepared.continuation) response.setHeader("x-vertex-continuation", "suffix");
       response.setHeader("content-type", restored.headers.get("content-type"));
       if (prepared.stream) response.setHeader("x-accel-buffering", "no");
       for await (const bytes of restored.body) {
