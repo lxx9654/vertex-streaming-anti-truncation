@@ -66,7 +66,8 @@ export function createGenerateHandler(adapters, { fetchImpl = fetch, timeoutMs =
       });
       stage = "restoration";
       const restored = await restoreSillyTavernResponse(upstream, prepared);
-      response.setHeader("cache-control", "no-store");
+      // ST's global compression() would hold SSE chunks until the reply ends; no-transform opts out.
+      response.setHeader("cache-control", prepared.stream ? "no-store, no-transform" : "no-store");
       response.setHeader("x-content-type-options", "nosniff");
       response.setHeader("x-anti-truncation-transport", prepared.upstreamStream ? "native-streaming" : "buffered");
       if (prepared.continuation) response.setHeader("x-vertex-continuation", "suffix");

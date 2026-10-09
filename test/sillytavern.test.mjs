@@ -347,6 +347,8 @@ test("server handler uses one mock upstream request and returns readable native 
   t.after(() => { server.closeAllConnections(); server.close(); });
   const response = await fetch(`http://127.0.0.1:${server.address().port}`, { method: "POST", body: JSON.stringify(body) });
   assert.equal(response.status, 200);
+  // ST's compression() would otherwise buffer the whole stream.
+  assert.match(response.headers.get("cache-control"), /no-transform/);
   assert.equal(contents(await response.text()), "正文😀");
   assert.equal(calls, 1);
 });
