@@ -2,6 +2,63 @@
 
 中文 | [English](CHANGELOG.md)
 
+## 独立网关 0.9.1 与 SillyTavern 集成 0.5.1 — 原生路线上的工具结果
+
+标签 `gateway-v0.9.1`（Docker 镜像 `0.9.1`）与 `sillytavern-v0.5.1`（一键安装包）位于同一提交。用到工具的请直接用本版替换 0.9.0/0.5.0。
+
+- 修复：在原生路线上（SillyTavern 插件、Express、Flex），工具执行后的下一次请求会以 HTTP 400 失败。原因是抗截断说明和工具结果被放在了同一轮里，Gemini 3.7 会拒绝（“Requests ending with a model turn are not supported”）。现在工具结果之后的用户文字另起一轮：网关的原生翻译和插件在酒馆转换提示词之后都这样处理。兼容接口（Standard 与完整模式 Priority）不受影响。
+- 由 0.9.0/0.5.0 的实测发现：插件交回了带签名的真实调用，随后回传工具结果的请求失败。修复后，经插件（Standard）和网关 Flex 路线发出的 Gemini 3.7 Flash 真实请求，在非流式和流式下都完成了工具调用和结果回传，正文正常还原、正常结束；Gemini 4 Argon 经插件也同样通过。本地 217 项测试和 115 个发布文件检查通过。
+
+## 独立网关 0.9.0 与 SillyTavern 集成 0.5.0 — 客户端工具与抗截断共用
+
+标签 `gateway-v0.9.0`（Docker 镜像 `0.9.0`）与 `sillytavern-v0.5.0`（一键安装包）位于同一提交。酒馆插件请前后端一起更新；服务端插件较旧时，带工具的请求走酒馆原流程。
+
+- **网关**：带客户端工具（`tool_choice` 省略或为 `auto`）或工具历史的请求不再跳过，而是照常包装。随机命名的合成工具排在客户端工具之后，`tool_choice` 改为 `required`，客户端的 `parallel_tool_calls` 保留，末尾说明改为“正文放进合成工具，其他工具按需调用”。真实工具调用与还原后的正文一起交给客户端，结束原因保持 `tool_calls`；流式中真实调用的 index 从 0 连续编号。`tool_choice: "none"` 时客户端工具仍声明但强制合成工具。强制的 `tool_choice`（`required` 或指定函数）、旧版 `functions`/`function_call`/`role: function`、结构化输出和多候选仍跳过包装。原生参数流只承载合成工具，带客户端工具或工具历史的流式请求改走缓冲回退（`tool-transport-buffered-fields`）；Express 和 Flex 下是整段函数调用的原生流。
+- **酒馆服务端插件**：酒馆注册的函数工具和工具调用历史也经抗截断传输。工具历史沿用酒馆自己的提示词转换；工具定义转成原生声明，排在合成工具之前。真实调用以 Gemini `functionCall` 片段交回酒馆，带思考签名（Gemini 4 Argon 另带原生调用 ID），并单独成一个事件，因为酒馆的流式读取会忽略带调用事件里的正文。流式模式下这类请求不逐段读取函数参数，正文在模型写完后一次到达，思考过程仍逐步显示。参数 Schema 无法转成原生声明的工具（如含 `default`、`pattern`）、非函数工具、强制工具选择和旧版 functions 仍走酒馆原流程。
+- **扩展**：服务端状态新增 `features: ["client-tools"]`。没有这项时，带工具的请求走酒馆原流程，面板提示服务端插件较旧；其他请求不受影响。安装包里的扩展新增 `src/vertex-schema.mjs` 与 `src/wire.mjs`，用于 Schema 检查。TauriTavern 中带工具的请求走它的原流程，因为它的后台如何处理工具历史尚未核对。
+- 控制台日志标签改为说明 `existing-tools`、`tool-history` 指旧版 functions。
+- 验证：本地 215 项测试和 115 个发布文件检查通过；本地 Docker 镜像通过独立 Compose 冒烟测试；离线用酒馆 1.19.0 自己的提示词转换器，把带签名和不带签名的工具历史（Gemini 3.7 Flash 与 Gemini 4 Argon）转成了预期的原生请求。本次发布没有发送真实 Vertex 请求。
+
+## 独立网关 0.8.0 — Docker 部署
+
+- 发布基于 Node 24 的 amd64/arm64 Linux 镜像到 GHCR，提供 `latest`、`0.8.0` 和提交标签；默认 Compose 直接拉取镜像，`compose.build.yaml` 支持源码构建。包含网页控制台、持久化配置卷、非 root 运行、只读根文件系统和本地健康检查。
+- 本机安装保持回环监听默认值；容器监听和明确配置的控制台/API 公开地址支持端口映射与 HTTPS 反代，保留 Host/Origin、会话和 CSRF 校验。
+- 增加中英文部署说明及独立 Compose 冒烟测试，覆盖首次设置、鉴权、重建后配置恢复、容器网络、中文渲染和正常退出；测试不执行真实推理。
+
+## 未发布 — 更新体验
+
+2026-10-14 的 `main` 源码更新，版本号仍为 0.4.0。
+
+- 扩展不再要求服务端插件与自己版本号完全相同，只要求不低于 0.3.1。酒馆每次启动会自动更新用 Git 装的服务端插件，却不会自动更新扩展，以前每次发版后这类用户都会遇到“版本不匹配”，“继续”和图片输入被拦下。
+- 面板提示区分“找不到服务端插件”和“服务端太旧”，写明两种装法各自的更新办法；两边版本不同但兼容时，手动检查会建议更新较旧的一方。
+- 酒馆说明的“更新与已有手动安装”改写为按安装方式说明更新办法，包括酒馆会自动更新什么、不会自动更新什么。
+
+## SillyTavern 集成 0.4.0
+
+独立网关保持 0.7.0。标签 `sillytavern-v0.4.0`。前后端版本号一起改为 0.4.0，从 0.3.x 升级时请同时更新两半，只更新一半时面板会提示版本不匹配。
+
+- 发布下面两节的改动：TauriTavern（TT 酒馆）适配版，以及 Gemini 4 Argon 适配中属于酒馆插件的部分。
+- 一键安装包内容与 `main` 上的发版提交相同；Termux 里的 SillyTavern 也可使用，TauriTavern 不使用安装包。
+- 验证见[验收说明](docs/VALIDATION.md)。
+
+## TauriTavern（TT 酒馆）适配版
+
+随 SillyTavern 集成 0.4.0 发布。说明见 [TauriTavern](docs/SILLYTAVERN.md#tauritavern)。
+
+- UI 扩展可单独在 [TauriTavern](https://github.com/Darkatse/TauriTavern) 中使用。TauriTavern 不能运行服务端插件，扩展检测到它后自己改写请求并还原回复：传输指令追加到酒馆自己的 Vertex 请求，原生 `tools`／`toolConfig` 通过“附加参数”写入，凭据、提示词转换、采样与思考参数仍由 TauriTavern 处理。
+- 两种抗截断模式都读取 TauriTavern 转发的 Google 原始流式事件，保留原始结束原因；非流式抗截断不开启参数流，完整并通过检查后一次交付。Unicode 转码与“继续”适配可用；图片输入不可用。Vertex“附加参数”写成 YAML 时本次走普通 Vertex 并显示原因。
+- `anti-truncation`、`vertex-text-stream`、`vertex-protocol`、`gemini4` 不再在模块顶部导入 `node:crypto`，以便在 WebView 中加载；网关与 SillyTavern 服务端插件的行为不变。
+- 新增[给 AI 助手的安装指引](docs/AGENT-INSTALL.md)，README 开头增加“安装哪一种”分流：如何判断 SillyTavern 与 TauriTavern、全程命令行的安装步骤、要先问用户的事项和核对方法。酒馆说明补上界面操作的命令行等价做法，并注明 Release 压缩包不含 `main` 上的改动、打包出的前端目录不能用于 TauriTavern。另增“手机上怎么装”：Termux 里的 SillyTavern 与 TauriTavern App 各自的装法。
+- 202 项本地测试通过。扩展在 Chromium 内核中用模拟酒馆通道完成 6 次请求，并在本机 TauriTavern 2.1.1 与 2.3.0 中完成加载；另有 6 次真实 Vertex 请求（Gemini 3.7 Flash）验证了流式、非流式、“继续”和输出上限截断；请求体由脚本按 TauriTavern 源码规则拼出，其自身后台发出的请求尚未验证，见[验收说明](docs/VALIDATION.md)。
+
+## Gemini 4 Argon
+
+酒馆插件部分随 SillyTavern 集成 0.4.0 发布；独立网关部分为 2026-10-14 的 `main` 源码更新，网关版本号仍为 0.7.0。请按[源码升级说明](docs/GEMINI4.md#升级方式)更新。
+
+- 适配 `gemini-4-argon` 的正常、非流式抗截断、原生流式抗截断与酒馆 Vertex 插件。使用思考等级，过滤官方列出的不支持参数，预填充转 USER 开关覆盖 Argon。
+- 保留原生工具调用 ID 与思考签名；数字思考预算、显式缓存和需要 continuation-token 长解码的输出额度在推理前报错，不自动追加付费请求。
+- 191 项本地测试和三次真实网关短请求通过，流式正文分 7 批到达。Express 仅做模拟验证，具体边界见[验收说明](docs/VALIDATION.md)。
+
 ## SillyTavern 集成 0.3.1
 
 独立网关保持 0.7.0。标签 `sillytavern-v0.3.1`。

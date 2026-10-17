@@ -2,9 +2,105 @@
 
 中文 | [English](VALIDATION.en.md)
 
+## Docker 网关 0.8.0（2026-10-16）
+
+Windows 和 Linux amd64 容器内的 206 项离线测试通过。Compose 验收覆盖首次设置、Host/Origin/CSRF 与 API 鉴权、宿主机映射端口、容器服务名访问、非 root 和只读根文件系统、中文 WebP 渲染、重建后保留配置、健康检查及正常退出。ARM64 镜像另做本地模拟运行的 Compose 验收；它不是 ARM 实机性能测试。
+
+真实测试在独立 amd64 容器中以只读方式挂载用户授权的本地服务账号，使用 Gemini 3.7 Flash、global、Standard。串行发送 3 次请求，每次最多 512 输出 token，关闭提示词重试；凭据未写入仓库或镜像，文件哈希前后相同，测试容器已移除。
+
+| 路径 | 结果与证据边界 |
+| --- | --- |
+| 普通 JSON 回复 | 客户端验收通过；正文非空、restored=true、finish_reason=stop |
+| 原生流式 | 客户端验收通过；7 次正文事件与读取，首段约 50.88 秒、正文跨度 414 ms，收到 DONE，restored=true、stop |
+| 中文文字转图片后非流式回复 | HTTP 200；网关完成记录显示 encoded、1 页、restored=true、stop、正文存在且完整；约 3.80 秒 |
+
+首次第三条请求的临时验收脚本把非流式应有的 `tool-transport` 错误地要求为流式回退标记 `tool-transport-buffered-fields`，在读回正文前断言失败。当时没有逐字核对 `DOCKER_OK`，也没有自动重试；该次的成功依据仅为已完成的请求记录。
+
+### 图片回复正文补验（2026-10-16）
+
+用户另行授权后，修正并保存为 `scripts/docker-image-live.mjs`：只发送一次图片请求，先保存完整响应正文，再核对非流式传输标记、回复内容和同一请求 ID 的网关事件；所有失败均停止，不重试。5 项离线回归覆盖正常回复、错误传输标记、多余正文、错误事件关联和 HTTP 失败，并验证失败时仍保存正文。旧临时入口也改为调用这个单请求脚本。
+
+对已发布的 `ghcr.io/ken050210/vertex-streaming-anti-truncation:0.8.0` 镜像执行一次真实补验，仍使用同一本地服务账号、Gemini 3.7 Flash、global、Standard、512 输出 token 上限及关闭提示词重试。中文提示为“请只回复英文标记 DOCKER_OK，不要解释。”。
+
+| 检查 | 实际结果 |
+| --- | --- |
+| 图片输入 | `encoded`，`all` 模式，1 页 WebP，19,112 字节 |
+| 客户端回复 | HTTP 200，`tool-transport`，正文恰好为 `DOCKER_OK` |
+| 还原与完成状态 | `restored=true`、`finish_reason=stop`；事件为 `request_complete`，完整性为 `complete` |
+| 请求关联 | `416c71b0-4b4f-483b-bc30-c8f3db68b0e1`；独立网关仅记录 1 次生成，`promptRetried=false` |
+| 时间 | 2026-10-15 23:35:18 UTC 完成；服务端 4,082 ms，客户端含事件核对 4,108 ms |
+| 清理与凭据 | 测试容器已移除，凭据只读挂载且文件哈希前后相同 |
+
+完整正文与事件保存在本地忽略文件 `runtime/docker-image-live-result-2026-10-16.json`。本轮修正后的 `npm run verify` 通过 115 个发布文件检查和 211 项离线测试。补验确认了发布镜像的短图片请求和回复正文，不代表长篇写作、浏览器操作或任意反向代理环境均已验收。
+
+如需自行执行，会发送一次真实请求；先拉取上述镜像，再显式提供凭据：
+
+```sh
+node scripts/docker-image-live.mjs --live --credentials /absolute/private/service-account.json
+```
+
+默认回执写入 `runtime/` 下的独立文件；可用 `--report <path>` 指定回执，用 `--image <reference>` 指定已存在于本机的镜像。普通 `npm run verify` 不发送真实请求。
+
 本页区分本地模拟测试、独立网关的真实上游测试，以及提取前的 router 验证。
 
+## 更新体验（2026-10-14，main 源码更新）
+
+依据 SillyTavern 1.19.0 源码：`enableServerPluginsAutoUpdate`（默认开启）让酒馆在每次启动时对用 Git 装的服务端插件执行 `git pull`；第三方 UI 扩展只在清单声明 `auto_update` 且酒馆自身版本变化时自动更新，本扩展没有声明，所以只能手动更新。
+
+`npm run verify` 通过 101 个发布文件检查和 203 项测试，新增版本比较规则的单元测试。在 Claude 桌面应用的内置浏览器（Chromium）中加载真实的扩展入口，模拟服务端插件的状态接口：找不到服务端时提示安装并拦下“继续”；0.3.0 提示太旧及两种装法的更新办法并拦下“继续”；0.3.1、0.4.0、0.5.0 均放行“继续”，手动检查时分别建议更新服务端、显示已就绪、建议更新扩展。未在真实酒馆中观察。
+
+## TauriTavern（2026-10-14，随 SillyTavern 集成 0.4.0 发布）
+
+`npm run verify` 通过 101 个发布文件检查和 202 项测试，其中 `test/tauritavern.test.mjs` 新增 11 项，用模拟的酒馆通道覆盖：请求留在酒馆自己的路由并保留请求头与取消信号、原生工具字段写入附加参数、已有 JSON 附加参数合并与 YAML 旁路、参数流逐段还原（首段先于上游结束到达）、非流式与缓冲 SSE 两种交付形状、长度上限保留原始结束原因、五种中断／损坏／上游错误不报成功且不回显上游错误正文、酒馆自身错误文本原样送达、取消不产生错误事件、“继续”指令与状态、Argon 输出上限在发送前检查，以及扩展加载的全部模块不含 Node 专用导入。
+
+浏览器内核检查：在 Claude 桌面应用的内置浏览器（Chromium）中加载真实的扩展入口 `index.js`，宿主全局对象和酒馆通道为模拟。面板只显示关闭／Unicode 两项输入转码、没有“检查插件连接”按钮；6 次模拟请求覆盖流式逐段还原、非流式 JSON、缓冲 SSE、流式中断（错误事件）、非流式中断（HTTP 502 且面板显示代码）和酒馆错误文本。
+
+本机 TauriTavern（Windows 便携版）2.1.1 与 2.3.0 各一次：把扩展文件复制到该用户的扩展目录后启动，酒馆保存的设置中出现本扩展的默认项（2.3.0 启动前先删去该项，启动后重新出现），说明扩展入口及其模块在 WebView2 中求值完成并挂载到 Vertex 面板。没有在其中发送生成请求，没有更改凭据或连接设置。
+
+用户在 TauriTavern 2.3.0 的 Vertex 面板中目视确认“抗截断传输”已出现。
+
+真实 Vertex 请求（用户批准，复用 SillyTavern 已保存的服务账号，未改动凭据）：6 次，Gemini 3.7 Flash、global、Standard，每次最多 1024 输出 token，固定短提示词，不重试，共约 6.8k token。扩展的拦截、改写和还原使用本仓库代码；TauriTavern 的 Rust 后台没有参与，由临时脚本按其 v2.3.0 源码的规则拼出 Vertex 请求体（连续同角色消息不合并、十项安全设置、思考等级、附加参数覆盖顶层字段），并把 Google 的事件按其路由的帧格式转发。Google 接受了全部 6 个请求体，其事件均带 `role` 与 `modelVersion`／`responseId` 等字段，没有一条被误判为酒馆错误文本。
+
+| 请求 | 结果 |
+| --- | --- |
+| 流式抗截断，酒馆流式 | 309 字符与样本逐字一致；Google 发来 9 段参数流，客户端 8 次正文读取，首段约 2.70 秒，跨度约 855 ms；STOP、restored=true |
+| 非流式抗截断，酒馆非流式 | 上游经流式通道返回 1 个完整函数调用；JSON 正文逐字一致，stop／STOP，思考文本保留 |
+| 非流式抗截断，酒馆流式 | 逐字一致，正文一次交付，STOP |
+| “继续”（续写提示），流式 | 只返回续文（换行加后 6 行，与前文拼接后等于样本），无重复；面板状态报告已请求续文 |
+| 输出上限 300，流式 | 交付 329 字符，与模型已写入的参数逐字一致且是样本的前缀；结束原因保持 MAX_TOKENS，没有 STOP |
+| 输出上限 300，非流式 | Google 只返回思考与 MAX_TOKENS，没有函数调用；扩展返回空正文、`length`／MAX_TOKENS，未报告为完成 |
+
+这些是单次短样本，不代表速度、长文或开放剧情的质量。
+
+依据源码而未在运行中验证：TauriTavern v2.1.1、v2.3.0 与 `main`（2026-10-10）都在构建完上游请求体后应用附加参数，并把 Vertex 的流式事件原样转发。
+
+安装文档与安装路径（同日）：请一个没有读过仓库的 AI 助手只读文档做纸面演练，场景是用户只说“帮我安装这个仓库里的抗截断插件”。第一次演练指出没有“装哪一种”的分流、唯一的安装命令属于网关、前端安装和核对只有界面操作、安装程序的命令行用法只写在代码注释里、打包出的前端目录在 TauriTavern 中无法加载、Release 压缩包与 `main` 版本号相同等问题，文档据此修改。修改后的第二次演练在读到第二个文件时即确定装法，三种情况（SillyTavern、TauriTavern、类型未知）给出的命令与[安装指引](AGENT-INSTALL.md)一致，没有阅读源码；它另外指出的版本要求写法不一、已装副本的处理、如何确认酒馆已关闭等缺口也已补上，补上之后没有再演练。
+
+实际执行过的安装路径：全新克隆（没有 `node_modules`）后运行 `node scripts/package-sillytavern.mjs` 和 `node dist/sillytavern/install.mjs <目录> --skip-deps`，在没有终端输入的情况下对模拟的酒馆目录完成安装，退出码 0，两半就位，`config.yaml` 先备份再开启服务端插件。在运行中的 SillyTavern 1.19.0（未开启账号）上，`/api/plugins/vertex-anti-truncation/status` 返回 0.3.1、ready。把仓库 `git clone --depth 1` 到 TauriTavern 2.3.0 的用户扩展目录后，扩展加载。未执行：对真实酒馆运行安装程序、Git 装法的三条命令、TauriTavern 界面里的“安装扩展”，以及手机上的任何安装（Termux 里的 SillyTavern、TauriTavern App）。安装程序与 TauriTavern 路径的自动测试在 GitHub Actions 的 Linux、macOS、Windows（Node.js 22.9、22、24）上通过。
+
+尚未覆盖：由 TauriTavern 自己的后台发出的真实请求（需要在其中保存 Vertex 凭据）及其页面上的逐段显示、Express／Flex／Priority、通过 TauriTavern 的扩展管理器安装和更新、Android／iOS／macOS 的 WebView、TauriTavern 中的 Gemini 4 Argon（核对时仅其 `dev` 分支收录该模型）。
+
+## Gemini 4 Argon（2026-10-14；酒馆插件部分随 0.4.0 发布）
+
+`npm run verify` 通过 191 项测试；提交前补齐文档后，`npm run check` 检查 98 个发布文件通过。新增覆盖思考等级、旧客户端等级别名、显式配置优先、数字预算与缓存的本地拒绝、每次上游输出上限、预填充开关、原生工具 ID/签名往返，以及 Express/OAuth × 三种传输 × 普通/SSE 的模拟请求矩阵。旧酒馆预算适配器不认识 Argon 时仍能生成 LOW/MEDIUM/HIGH。安装包生成完成，未安装进现有酒馆。
+
+用户明确批准最多 8 次上游调用、每次最多 512 输出 token、固定短提示词、错误即停。两个仓库共执行 8 次，均 HTTP 200、stop；硬限额记录为 submitted=8、failed=false，没有重试。均使用现有服务账号、global、Standard，未改变其密钥。
+
+独立网关在临时回环端口完成 3 次真实请求：正常与非流式抗截断均返回 OK；原生流式抗截断还原 16 行文本（454 字符），7 次正文读取，首正文约 1.97 秒，正文跨度约 566 ms，最终 restored=true、stop、DONE。普通与缓冲请求总耗时分别约 2.17/2.25 秒；这些都是单次短样本，不是模型速度或长文质量基准。
+
+母仓库的同源码临时实例完成另外 5 次，调用原有 `Invoke-RouterSmokeTest.ps1`：正常 JSON/SSE、抗截断 JSON、实验性抗截断 JSON/SSE。实验性流式 7 次正文读取、跨度 739 ms，日志还原状态检查通过。临时实例禁用重试并用统一硬限额保护测试；没有把测试写入日常服务的使用记录。日常 Docker 实例已重建，三个模型在实际 `/v1/models` 中可见，健康、所有权、回环绑定与控制台独立核实。
+
+尚未覆盖：真实 Express API key 的 Argon 权限、Priority/Flex 的 Argon 实测、已安装酒馆的浏览器交互、长上下文/长篇输出质量。没有实现超过单次上游上限的 continuation-token 长解码。酒馆插件部分随 `sillytavern-v0.4.0` 发布，独立网关部分为 `main` 源码更新。配置与升级说明见 [Gemini 4](GEMINI4.md)。
+
 ## 独立发布包
+
+### SillyTavern 集成 0.4.0：TauriTavern 与 Gemini 4 Argon 适配（2026-10-14）
+
+发布时 `npm run verify` 通过 101 个发布文件检查和 202 项测试；发版前最近一次提交在 GitHub Actions 的 Linux、macOS、Windows（Node.js 22.9、22、24）上通过。代码即上文“TauriTavern”和“Gemini 4 Argon”两节验证的内容，前后端版本号改为 0.4.0。
+
+安装包：ZIP 内 63 个条目，路径都用正斜杠；解压后与 `npm run package:sillytavern` 的输出逐文件一致，前后端均为 0.4.0。在模拟酒馆目录中运行 ZIP 里的安装程序（没有终端输入）：首次安装联网装好图片渲染组件，备份并开启 `enableServerPlugins`，退出码 0；再次运行按更新处理，不改 `config.yaml`，退出码 0。
+
+尚未验证：安装程序在真实 SillyTavern 和 Termux 上的运行，以及 0.4.0 前后端装入真实酒馆后的加载；其余未覆盖项见上文两节。
 
 ### SillyTavern 集成 0.3.1：“继续”适配、流式修复与一键安装包（2026-10-09）
 

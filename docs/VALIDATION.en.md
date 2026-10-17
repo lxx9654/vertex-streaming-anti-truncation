@@ -2,9 +2,103 @@
 
 [中文](VALIDATION.md) | English
 
+## Docker gateway 0.8.0 (2026-10-16)
+
+All 206 offline tests passed on Windows and inside a Linux amd64 container. Compose checks cover initial setup, Host/Origin/CSRF and API authentication, published ports, service-name networking, non-root/read-only operation, CJK WebP rendering, persistence across recreation, health and graceful shutdown. The ARM64 image also receives a locally emulated Compose check; this is not an ARM hardware performance test.
+
+Live validation used an isolated amd64 container with a read-only mount of the user-authorized local service account, Gemini 3.7 Flash, global and Standard. Three sequential requests were capped at 512 output tokens each, with prompt retries disabled. Credentials were not copied into the repository or image; the file hash was unchanged and the test containers were removed.
+
+| Path | Result and evidence boundary |
+| --- | --- |
+| JSON reply | Client checks passed: nonempty content, restored=true, finish_reason=stop |
+| Native streaming | Client checks passed: 7 content events/reads, first content at about 50.88 seconds and a 414 ms content span, DONE received, restored=true and stop |
+| CJK text rendered as an image, non-stream reply | HTTP 200; the completed gateway event records one encoded page, restored=true, stop and complete nonempty content; about 3.80 seconds |
+
+For the original third request, the temporary harness incorrectly expected the streaming fallback label `tool-transport-buffered-fields` instead of the correct non-stream label `tool-transport`. It failed before reading the body. The exact `DOCKER_OK` reply was not checked at that time, and no automatic retry was made; that request's successful completion was supported only by its gateway event.
+
+### Image reply body follow-up (2026-10-16)
+
+After separate user authorization, the corrected harness was saved as `scripts/docker-image-live.mjs`. It sends exactly one image request, captures the complete response body before assertions, then checks the non-stream transport, reply content and gateway event with the same request ID. Every failure stops without retrying. Five offline regression cases cover success, a wrong transport label, extra reply text, a mismatched event and an HTTP failure, including body retention on failure. The former temporary entry point now delegates to this single-request script.
+
+One live follow-up used the published `ghcr.io/ken050210/vertex-streaming-anti-truncation:0.8.0` image with the same local service account, Gemini 3.7 Flash, global, Standard, a 512-output-token cap and prompt retries disabled. The Chinese prompt was “请只回复英文标记 DOCKER_OK，不要解释。” (reply only with the English marker DOCKER_OK, without explanation).
+
+| Check | Observed result |
+| --- | --- |
+| Image input | `encoded`, `all` mode, one WebP page, 19,112 bytes |
+| Client response | HTTP 200, `tool-transport`, body content exactly `DOCKER_OK` |
+| Restoration and completion | `restored=true`, `finish_reason=stop`; `request_complete` event and `complete` integrity |
+| Correlation | `416c71b0-4b4f-483b-bc30-c8f3db68b0e1`; exactly one generation event in the isolated gateway, `promptRetried=false` |
+| Timing | Completed at 2026-10-15 23:35:18 UTC; 4,082 ms server latency, 4,108 ms client time including event checks |
+| Cleanup and credentials | Test container removed; credential mounted read-only with an unchanged file hash |
+
+The full body and event are retained locally in the ignored file `runtime/docker-image-live-result-2026-10-16.json`. Following this harness fix, `npm run verify` passed 115 release-file checks and 211 offline tests. This follow-up validates a short image request and its reply body on the published image; it does not establish long-form quality, browser acceptance or compatibility with every reverse proxy.
+
+To run this check yourself, first pull the image above and explicitly provide credentials. This sends one real request:
+
+```sh
+node scripts/docker-image-live.mjs --live --credentials /absolute/private/service-account.json
+```
+
+The receipt defaults to a unique file under `runtime/`. Use `--report <path>` to select another receipt path and `--image <reference>` to select an image already present locally. Normal `npm run verify` does not send live requests.
+
 Local fixtures, live standalone requests and historical router checks cover different parts of the system.
 
+## Update experience (2026-10-14, main source update)
+
+From the SillyTavern 1.19.0 source: `enableServerPluginsAutoUpdate` (on by default) runs `git pull` on Git-installed server plugins at every start; third-party UI extensions update automatically only when their manifest sets `auto_update` and Tavern's own version changed. This extension does not set it, so it is only updated by hand.
+
+`npm run verify` passed the check of 101 release files and 203 tests, including a new unit test of the version rule. The real extension entry ran in the Claude desktop app's built-in Chromium browser against a simulated status endpoint: with no server plugin it asked for an install and blocked Continue; 0.3.0 was reported as too old with the update steps for both install methods, and Continue was blocked; 0.3.1, 0.4.0 and 0.5.0 all let Continue through, and a manual check suggested updating the server, reported it ready, or suggested updating the extension respectively. Not observed in a real Tavern.
+
+## TauriTavern (2026-10-14, released in SillyTavern integration 0.4.0)
+
+`npm run verify` passed the check of 101 release files and 202 tests. The 11 new tests in `test/tauritavern.test.mjs` use a simulated Tavern route and cover: the request staying on Tavern's own route with its headers and abort signal, native tool fields in Additional Parameters, merging existing JSON parameters and bypassing YAML ones, piece-by-piece restoration (the first piece arrives before the upstream ends), JSON and buffered-SSE delivery, native finish codes for length limits, five interrupted/malformed/upstream-error cases that neither report success nor echo provider error text, Tavern's own error text, cancellation without an error event, Continue, the Argon output limit before sending, and the absence of Node-only imports in everything the extension loads.
+
+Browser engine: the real extension entry `index.js` was loaded in the Claude desktop app's built-in Chromium browser with stand-ins for the host globals and Tavern's route. The panel offered only off/Unicode input and no plugin check button. Six simulated requests covered streamed restoration, buffered JSON, buffered SSE, an interrupted stream (error event), an interrupted buffered reply (HTTP 502 with the code in the panel) and Tavern's error text.
+
+Local TauriTavern (Windows portable), once on 2.1.1 and once on 2.3.0: after copying the extension into the user's extension folder and starting the app, Tavern's saved settings contained this extension's defaults (removed before the 2.3.0 start and written again after it), so the entry module and its imports evaluated in WebView2 and mounted on the Vertex panel. No generation request was sent there and no credentials or connection settings were changed.
+
+The user confirmed by eye that the transport selector appears on the Vertex panel in TauriTavern 2.3.0.
+
+Live Vertex requests (approved by the user, reusing SillyTavern's saved service account without changing it): six, on Gemini 3.7 Flash, global, Standard, at most 1024 output tokens each, fixed short prompts, no retries, about 6.8k tokens in total. Interception, request shaping and restoration ran this repository's code. TauriTavern's Rust backend was not in the loop: a temporary script built the Vertex body by the rules of its v2.3.0 source (consecutive same-role turns kept separate, ten safety settings, thinking level, Additional Parameters replacing top-level fields) and forwarded Google's events in its route's framing. Google accepted all six bodies; every event carried `role` and fields such as `modelVersion`/`responseId`, and none was mistaken for Tavern's error text.
+
+| Request | Result |
+| --- | --- |
+| Streaming transport, Tavern streaming | 309 characters identical to the sample; nine argument pieces from Google, eight content-bearing reads, first content at about 2.70 s over about 855 ms; STOP, restored=true |
+| Buffered transport, Tavern non-streaming | One complete function call over the streaming route; JSON content identical, stop/STOP, thoughts kept |
+| Buffered transport, Tavern streaming | Identical, delivered in one read, STOP |
+| Continue (nudge prompt), streaming | Only the suffix (a newline plus the last six lines, equal to the sample when appended), nothing repeated; the panel reported the suffix request |
+| Output limit 300, streaming | 329 characters delivered, identical to what the model had written into the arguments and a prefix of the sample; the ending stayed MAX_TOKENS, no STOP |
+| Output limit 300, non-streaming | Google returned thoughts and MAX_TOKENS without a function call; the extension returned empty content with `length`/MAX_TOKENS, not a completed reply |
+
+These are single short samples, not benchmarks of speed, long output or open-ended writing.
+
+Read from source, not observed at runtime: TauriTavern v2.1.1, v2.3.0 and `main` (2026-10-10) all apply Additional Parameters after building the upstream body and forward Vertex streaming events unchanged.
+
+Install documentation and install paths (same day): an AI agent that had never seen the repository did a paper exercise from the docs alone, given only "install the anti-truncation plugin from this repository". The first run found no routing between the three products, the only install commands belonging to the gateway, UI-only steps for the extension and for verification, the installer's command-line usage documented only in a code comment, a packaged UI folder that cannot load in TauriTavern, and a Release ZIP sharing its version number with `main`. The docs were revised accordingly. A second run on the revised docs settled the route by the second file, produced commands matching the [install guide (Chinese)](AGENT-INSTALL.md) for all three cases (SillyTavern, TauriTavern, unknown) and did not read source code. The further gaps it reported (inconsistent version wording, handling of existing copies, confirming Tavern is closed) were also closed; no third run followed.
+
+Install paths actually executed: from a fresh clone without `node_modules`, `node scripts/package-sillytavern.mjs` and `node dist/sillytavern/install.mjs <folder> --skip-deps` completed against a simulated Tavern folder without terminal input, with exit code 0, both halves in place and `config.yaml` backed up before server plugins were enabled. On a running SillyTavern 1.19.0 without accounts, `/api/plugins/vertex-anti-truncation/status` returned 0.3.1, ready. After `git clone --depth 1` into the user extension folder of TauriTavern 2.3.0 the extension loaded. Not executed: the installer against a real Tavern, the three commands of the Git route, TauriTavern's in-app **Install extension**, and any install on a phone (SillyTavern in Termux, the TauriTavern app). The automated tests for the installer and the TauriTavern path passed on Linux, macOS and Windows (Node.js 22.9, 22, 24) in GitHub Actions.
+
+Not covered: a live request sent by TauriTavern's own backend (needs Vertex credentials saved there) and its piece-by-piece display on the page, Express/Flex/Priority, installing and updating through TauriTavern's extension manager, Android/iOS/macOS WebViews, and Gemini 4 Argon in TauriTavern (only its `dev` branch listed the model when checked).
+
+## Gemini 4 Argon (2026-10-14; Tavern plugin part released in 0.4.0)
+
+Verification passed 191 local tests. After the documentation update, the pre-commit check passed for 98 release files. New coverage includes thinking-level mapping, explicit config precedence, rejection before inference for numeric budgets/caches/long-decode limits, prefills, native function-call ID/signature round trips, and an Express/OAuth × transport × JSON/SSE mock matrix. The SillyTavern package was generated without installing it into the existing Tavern.
+
+The user authorized at most eight upstream calls, each capped at 512 output tokens, using fixed short prompts and stopping on the first error. All eight passed with HTTP 200 and stop, without retries, on the existing service account, global, Standard. Three exercised this gateway: normal and buffered requests returned OK; the native tool stream restored 454 characters over seven content-bearing reads, with first content at 1.97 s and a 566 ms content span. These are single short samples, not performance or long-context quality benchmarks.
+
+Five calls exercised the parent router through its existing smoke script against a temporary instance of the same source with retries disabled and a shared hard call limit. Its native tool stream delivered seven content-bearing reads over 739 ms and passed restoration audit checks. The daily Docker router was separately rebuilt and checked for health, ownership, loopback binding, controller readiness and the three new model IDs.
+
+Live Express entitlement, Argon Priority/Flex, installed Tavern browser behavior, and long-form quality remain unverified. Continuation-token long decode is not implemented. The Tavern plugin part ships in `sillytavern-v0.4.0`; the gateway part is a `main` source update. See the [setup and update guide](GEMINI4.en.md).
+
 ## Standalone package
+
+### SillyTavern integration 0.4.0: TauriTavern and Gemini 4 Argon adaptations (2026-10-14)
+
+At release `npm run verify` passed the check of 101 release files and 202 tests, and the last commit before the release passed GitHub Actions on Linux, macOS and Windows (Node.js 22.9, 22, 24). The code is what the "TauriTavern" and "Gemini 4 Argon" sections above validated; both halves now read 0.4.0.
+
+Package: the ZIP holds 63 entries, all with forward-slash paths; extracted, it matches the `npm run package:sillytavern` output file for file, with both halves at 0.4.0. Its installer ran against a simulated Tavern folder without terminal input: the first run installed the image renderer from the network, backed up `config.yaml` and enabled server plugins, exiting 0; a second run updated in place without touching `config.yaml`, exiting 0.
+
+Not verified: the installer on a real SillyTavern or in Termux, and 0.4.0 loading in a real Tavern; the sections above list the rest.
 
 ### SillyTavern integration 0.3.1: Continue support, streaming fix and one-step installer (2026-10-09)
 

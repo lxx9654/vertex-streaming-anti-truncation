@@ -4,11 +4,38 @@
 
 为 Vertex AI / Gemini 提供本地模型管理与工具调用抗截断传输。每个上游模型可保存正常、非流式抗截断和流式抗截断版本，可接入 SillyTavern 的自定义 OpenAI 连接。
 
-实验版，支持配置多个 Gemini 模型；默认保留 Gemini 3.7 Flash 的原有入口。模型与流式参数功能是否可用取决于上游。需要 Node.js 22.9+，图片输入使用 @napi-rs/canvas 与随附的 Noto CJK 字体。
+## 安装哪一种
+
+本仓库有三种用法，先按自己的情况选一种：
+
+| 你的情况 | 装什么 | 怎么装 |
+| --- | --- | --- |
+| 用 SillyTavern，想在 Google Vertex AI 连接面板里直接选抗截断 | 抗截断插件：UI 扩展和服务端插件两半 | [SillyTavern 说明](docs/SILLYTAVERN.md) |
+| 用 TauriTavern（TT 酒馆） | 抗截断插件的适配版：只装 UI 扩展 | [TauriTavern 说明](docs/SILLYTAVERN.md#tauritavern) |
+| 不用酒馆的 Vertex 连接，或给其他 OpenAI 兼容客户端用 | 独立网关 | 本页[启动](#启动) |
+
+在手机上使用时，先看[手机上怎么装](docs/SILLYTAVERN.md#手机上怎么装)：Termux 里的 SillyTavern 在 Termux 中用命令安装插件，TauriTavern App 只需在应用里安装扩展。
+
+**由 AI 助手代为安装时**：请助手先读 [给 AI 助手的安装指引](docs/AGENT-INSTALL.md)。里面有判断酒馆类型的方法、可以直接执行的命令、需要先问用户的事项和核对办法。“插件”指前两行，不是网关。可以把下面这段话直接发给助手：
+
+```text
+帮我安装 https://github.com/ken050210/vertex-streaming-anti-truncation 里的抗截断插件。
+动手前先完整阅读仓库的 docs/AGENT-INSTALL.md 并严格照做：
+https://raw.githubusercontent.com/ken050210/vertex-streaming-anti-truncation/main/docs/AGENT-INSTALL.md
+先判断我用的是 SillyTavern 还是 TauriTavern，找不到或拿不准就问我，不要猜，也不要装成独立网关。
+需要我关闭或重启酒馆时先告诉我；不要碰我的密钥、聊天和已有的插件文件。
+装完告诉我：你改了哪些文件、备份在哪里、怎么确认装好了、在哪里打开开关。
+```
+
+实验版，支持配置多个 Gemini 模型；默认保留 Gemini 3.7 Flash 的原有入口。模型与流式参数功能是否可用取决于上游。独立网关和 SillyTavern 服务端插件需要 Node.js 22.9+（TauriTavern 适配版不需要 Node.js），图片输入使用 @napi-rs/canvas 与随附的 Noto CJK 字体。
+
+已适配 **Gemini 4 Argon**（`gemini-4-argon`）：支持三种传输版本，处理思考等级、采样参数和预填充兼容；[添加方式、Express 快速 key、自定义上游的范围与长解码限制](docs/GEMINI4.md)。酒馆插件部分随 SillyTavern 集成 0.4.0（`sillytavern-v0.4.0`）发布；独立网关部分随网关 0.8.0 发布，支持源码和 Docker 部署。
 
 也提供 **SillyTavern 原生 Vertex 面板集成**：UI 扩展与服务端插件配套安装后，直接在 Google Vertex AI 连接面板选择关闭、非流式或流式抗截断，复用酒馆凭据，无需另开网关进程。默认关闭；[安装与验证说明](docs/SILLYTAVERN.md)。
 
-在酒馆“安装扩展”的 Git URL 输入框填入 `https://github.com/ken050210/vertex-streaming-anti-truncation`，分支留空。**首次还需在酒馆根目录执行** `node plugins.js install https://github.com/ken050210/vertex-streaming-anti-truncation` 安装配套服务端插件，再在 `plugins/vertex-streaming-anti-truncation` 目录运行 `npm ci --ignore-scripts` 安装图片输入所需的渲染依赖，启用 `enableServerPlugins` 并重启酒馆。仅安装前端无法完成抗截断传输；已有手动安装请先阅读[迁移说明](docs/SILLYTAVERN.md#更新与已有手动安装)，避免重复加载。也可以从 [Release `sillytavern-v0.3.1`](https://github.com/ken050210/vertex-streaming-anti-truncation/releases/tag/sillytavern-v0.3.1) 下载[一键安装包](docs/SILLYTAVERN.md#一键安装包)，解压后运行其中的安装程序，一次装好前后端并开启服务端插件，不需要 Git。
+SillyTavern 需要 1.19.x，有两种装法，只选一种：想在酒馆里跟随仓库更新，用 Git 装法；想一次装好两半，用一键安装包。Git 装法：在酒馆“安装扩展”的 Git URL 输入框填入 `https://github.com/ken050210/vertex-streaming-anti-truncation`，分支留空。**首次还需在酒馆根目录执行** `node plugins.js install https://github.com/ken050210/vertex-streaming-anti-truncation` 安装配套服务端插件，再在 `plugins/vertex-streaming-anti-truncation` 目录运行 `npm ci --ignore-scripts` 安装图片输入所需的渲染依赖，启用 `enableServerPlugins` 并重启酒馆。仅安装前端无法完成抗截断传输；已有手动安装请先阅读[迁移说明](docs/SILLYTAVERN.md#更新与已有手动安装)，避免重复加载。也可以从 [Release `sillytavern-v0.5.1`](https://github.com/ken050210/vertex-streaming-anti-truncation/releases/tag/sillytavern-v0.5.1) 下载[一键安装包](docs/SILLYTAVERN.md#一键安装包)，解压后运行其中的安装程序，一次装好前后端并开启服务端插件，不需要 Git。压缩包只在发版时更新；发版之后 `main` 上的新改动，可以用四条命令[从源码生成安装包并安装](docs/AGENT-INSTALL.md#sillytavern)。
+
+**TauriTavern（TT 酒馆）适配版**：同一个 UI 扩展也适配了 [TauriTavern](https://github.com/Darkatse/TauriTavern)。它把酒馆的 Node.js 后台换成了 Rust，不能运行服务端插件，所以在 TauriTavern 里只装 UI 扩展：在“安装扩展”中填入上面的 Git URL、分支留空即可，不需要 Node.js、`plugins.js`、`npm ci` 和 `enableServerPlugins`。扩展检测到 TauriTavern 后自己完成抗截断的请求改写和回复还原，凭据与提示词转换仍由 TauriTavern 处理。支持非流式／流式抗截断、Unicode 转码和“继续”适配，不支持图片输入。随 SillyTavern 集成 0.4.0 发布；[安装、与插件版的差别和验收范围](docs/SILLYTAVERN.md#tauritavern)。
 
 ## 来源
 
@@ -63,6 +90,8 @@ SillyTavern / OpenAI-compatible client
 ```
 
 ## 启动
+
+Docker 用户可直接拉取 `ghcr.io/ken050210/vertex-streaming-anti-truncation:latest`。下载 Compose 文件后运行 `docker compose pull`、`docker compose up -d`，再用 `docker compose logs vertex-gateway` 获取首次设置链接。镜像包含控制台与 API，配置保存在数据卷中；详见 [Docker 部署](docs/DOCKER.md)（下载、端口、服务器、反代与容器内酒馆连接）。以下为直接使用 Node.js 的启动方法。
 
 支持完整 Vertex AI 服务账号、Express 快速模式 API Key，以及短期 OAuth access token。完整模式需要已启用 Vertex AI API 的项目和模型调用权限。实际推理按你的 Google Cloud 账户计费。
 
@@ -130,7 +159,7 @@ node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
 npm run gateway
 ```
 
-服务只监听 `127.0.0.1`。`GET /healthz` 检查进程状态；其余接口都需要 `Authorization: Bearer <GATEWAY_API_KEY>`。服务账号私钥只在本机签署 JWT，JWT 发给 Google OAuth 换取短期 access token，再用于模型请求。
+直接运行时服务默认只监听 `127.0.0.1`；Docker 内监听 `0.0.0.0`，默认仅向宿主机本地发布端口。`GET /healthz` 检查进程状态；其余 API 接口都需要 `Authorization: Bearer <GATEWAY_API_KEY>`。服务账号私钥只在网关进程内签署 JWT，JWT 发给 Google OAuth 换取短期 access token，再用于模型请求。
 
 ### 通过代理访问 Google
 
@@ -205,11 +234,13 @@ Google 的 [Gemini 3.7 Flash](https://docs.cloud.google.com/gemini-enterprise-ag
 
 流式抗截断版本的纯文本流式请求优先使用原生函数参数分段。Standard 服务账号/OAuth 模式的非流式请求使用 Vertex OpenAI 兼容接口；无法翻译的扩展字段、媒体或额外消息元数据保留原参数并回退到兼容接口，此时可能仍需等待全文。响应头 `x-anti-truncation-transport` 会显示 `tool-transport-buffered-fields`。
 
-Express 和 Flex 的普通/流式请求均走原生接口。完整模式（服务账号或访问令牌）下的 Priority 与 Standard 一样走 OpenAI 兼容接口，只有“流式”模式的逐步输出仍走原生流式；Express 下的 Priority 仍走原生接口。以下原生接口限制只适用于走原生接口的请求。支持文本、内嵌 base64 图片、函数工具与工具历史、JSON/Schema、候选数量及常用采样/思考参数。不支持远程图片 URL、旧式 `functions`、`parallel_tool_calls`、logprobs 或未知扩展字段，遇到无法保留的参数返回 `400 unsupported_native_fields`，不会静默丢弃或改走 Standard。已有工具或结构化输出仍会跳过抗截断包装，原生接口继续正常翻译请求。
+Express 和 Flex 的普通/流式请求均走原生接口。完整模式（服务账号或访问令牌）下的 Priority 与 Standard 一样走 OpenAI 兼容接口，只有“流式”模式的逐步输出仍走原生流式；Express 下的 Priority 仍走原生接口。以下原生接口限制只适用于走原生接口的请求。支持文本、内嵌 base64 图片、函数工具与工具历史、JSON/Schema、候选数量及常用采样/思考参数。不支持远程图片 URL、旧式 `functions`、`parallel_tool_calls`、logprobs 或未知扩展字段，遇到无法保留的参数返回 `400 unsupported_native_fields`，不会静默丢弃或改走 Standard。客户端工具与抗截断的合成工具一起声明（见下文）；结构化输出仍会跳过抗截断包装，原生接口继续正常翻译请求。
 
 只有请求中所有图片都要求同一级别时，图片的 OpenAI `detail` 才转成 Gemini 整个请求共用的媒体分辨率：`low`/`high` 对应 `MEDIA_RESOLUTION_LOW`/`MEDIA_RESOLUTION_HIGH`。只要有图片是 `auto` 或没写 detail（包括文字转图片生成的页面），或各图片级别不同，就保持默认。`extra_body.google.media_resolution` 优先；只有所有图片一致要求另一个级别时才返回 400。system/developer 消息里的图片返回 400（systemInstruction 只收文字）。只有开头连续的 system/developer 消息进入 systemInstruction；聊天记录之后的（如 Post-History、深度注入）按原位置作为 user 文本发送，与 SillyTavern 自带的 Google 连接一致。
 
-已有 tools/functions、显式工具选择、工具历史、JSON/Schema 输出或多候选的请求会跳过包装，并继续遵循客户端的流式开关。真实工具、usage、思考元数据，以及 `length` / `content_filter` 等结束原因会保留。流中断会报错；网关不自动续写或重试已经开始输出的回复。
+客户端自带工具时照常包装：请求带 `tools` 且 `tool_choice` 省略或为 `auto` 时，合成工具排在客户端工具之后，`tool_choice` 改为 `required`（模型必须调用某个工具），末尾格式说明改为“正文放进合成工具，其他工具按需调用”；客户端的 `parallel_tool_calls` 原样保留。回复里合成工具还原为正文，真实工具调用原样交给客户端，结束原因保持 `tool_calls`；流式中真实调用的 `index` 从 0 连续编号，补上合成调用留下的空位。`tool_choice: "none"` 时客户端工具仍声明但不可调用，照旧强制合成工具。带工具调用历史（`assistant.tool_calls`、`role: tool`）的请求也照常包装，格式说明排在工具结果之后。合成工具名每次随机生成，不会与客户端工具重名。原生参数流只承载合成工具，所以带客户端工具或工具历史的流式请求改走缓冲回退（`tool-transport-buffered-fields`）：Standard／完整模式 Priority 走兼容接口，Express／Flex 走整段函数调用的原生流；正文会在模型写完后一次到达。
+
+仍跳过包装（`x-anti-truncation-transport` 写明原因）并继续遵循客户端流式开关的请求：`tool_choice` 为 `required` 或指定某个函数（`tool-choice`，客户端要的是工具调用而不是正文）、旧版 `functions`/`function_call`（`existing-tools`/`tool-choice`）、旧版 `role: function` 历史（`tool-history`）、JSON/Schema 输出或多候选。真实工具、usage、思考元数据，以及 `length` / `content_filter` 等结束原因会保留。流中断会报错；网关不自动续写或重试已经开始输出的回复。
 
 原生路线（streaming 模式的原生传输，以及所有 Express 或 Flex 请求）和 buffered 模式转成的 SSE 回复，只有请求设置 `stream_options.include_usage: true` 时网关才发送 choices 为空的用量片段。来自 Vertex OpenAI 兼容接口的流（normal 模式，以及完整模式 Standard／Priority 下回退到该接口的 streaming 模式请求）会把客户端的 `stream_options` 原样交给 Vertex，用量片段按 Vertex 实际返回转发。`router_anti_truncation` 随结束片段发送。
 
@@ -276,7 +307,7 @@ npm run smoke -- --live
 
 使用原生 Vertex 面板插件时，请在插件面板的“输入转码”下拉框中选择 Unicode，无需这个桥接脚本，详见 [插件说明](docs/SILLYTAVERN.md)。两种连接方式分别由各自开关控制；不是跨进程同步设置。关闭预设中的重复转码，以免原文无法匹配。
 
-转码不是加密，不保证模型理解或改善生成结果，可能增加 token 用量和延迟。插件 UI v0.2.0（当时为独立勾选框）已完成配套酒馆安装、开关持久化及三种传输模式的短请求验收；当前 UI 0.3.0 下拉框在实际酒馆中的导入与持久化尚未验证。这些验收不证明长文本理解或抗截断收益，详见 [验收记录](docs/UNICODE-INPUT-AUDIT.md)。
+转码不是加密，不保证模型理解或改善生成结果，可能增加 token 用量和延迟。插件 UI v0.2.0（当时为独立勾选框）已完成配套酒馆安装、开关持久化及三种传输模式的短请求验收；0.3.0 起改用的下拉框在实际酒馆中的导入与持久化尚未验证。这些验收不证明长文本理解或抗截断收益，详见 [验收记录](docs/UNICODE-INPUT-AUDIT.md)。
 
 ## 图片输入（第二种混淆选项）
 

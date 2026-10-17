@@ -1,21 +1,23 @@
 import { CONTINUATION_INSTRUCTION, prepareAntiTruncation, restoreAntiTruncationCompletion, wrapAntiTruncationStream } from "./anti-truncation.mjs";
-import { nativeRequestBody } from "./vertex-native.mjs";
-import { translateNativeCompletion } from "./vertex-protocol.mjs";
+import { SIGNATURE_ID_PREFIX, nativeRequestBody } from "./vertex-native.mjs";
+import { translateNativeCompletion, wrapNativeStream } from "./vertex-protocol.mjs";
 import { wrapNativeTextStream } from "./vertex-text-stream.mjs";
 import { inspectCompletion, guardCompletionStream } from "./completion-integrity.mjs";
 import { completionStream } from "./completion-stream.mjs";
 import { documentedUnsupported } from "./unsupported-params.mjs";
-import { protocolError, sseData, transformSse } from "./wire.mjs";
+import { isObject, protocolError, sseData, transformSse } from "./wire.mjs";
 import { bypassReason, BODY_LIMIT } from "../integrations/sillytavern/shared.js";
+import { isGemini4Argon, gemini4ThinkingLevel, gemini4ToolMetadata, validateGemini4Output } from "./gemini4.mjs";
 
 export const requestError = code => Object.assign(new Error(code), { status: 400, code });
 
-// Reuse ST's own prompt/name/media and thinking conversion. Nothing in the
-// incoming request is mutated; actual tools and Schema never enter this path.
+// Reuse ST's own prompt/name/media/tool-history and thinking conversion. Nothing in
+// the incoming request is mutated; client tools ride next to the transport tool, and
+// Schema output never enters this path.
 export function prepareSillyTavernRequest(request, adapters) {
   const body = request.body;
   if (!body || !Array.isArray(body.messages) || !body.messages.length || body.messages.some(message =>
-    !message || !["system", "developer", "user", "assistant"].includes(message.role)) ||
+    !message || !["system", "developer", "user", "assistant", "tool"].includes(message.role)) ||
     (body.stream != null && typeof body.stream !== "boolean")) throw requestError("invalid_request");
   if (Buffer.byteLength(JSON.stringify(body)) > BODY_LIMIT) throw Object.assign(requestError("request_too_large"), { status: 413 });
   const mode = body.vertex_anti_truncation;
@@ -37,12 +39,18 @@ export function prepareSillyTavernRequest(request, adapters) {
   // Add this after prompt processing and image conversion so the instruction
   // stays readable and the existing message remains unchanged in its context.
   const continuation = body.type === "continue";
-  const prepared = prepareAntiTruncation({ messages }, mode !== "off", false, { continuation });
+  const clientTools = Boolean(body.tools?.length);
+  const prepared = prepareAntiTruncation({ messages, tools: body.tools, tool_choice: body.tool_choice }, mode !== "off", false, { continuation });
   if (continuation && !prepared.toolName) {
     prepared.payload = { ...prepared.payload, messages: [...messages, { role: "user", content: CONTINUATION_INSTRUCTION }] };
   }
   const useSystemPrompt = Boolean(body.use_sysprompt);
   const prompt = adapters.convertGooglePrompt(prepared.payload.messages, body.model, useSystemPrompt, adapters.getPromptNames(request));
+  // ST's converter merges the closing instruction into the tool-result turn, which Vertex rejects
+  // ("Requests ending with a model turn are not supported"); give what follows the results its own turn.
+  const last = prompt.contents.at(-1);
+  const results = last?.parts.findLastIndex(part => part.functionResponse) ?? -1;
+  if (results >= 0 && results < last.parts.length - 1) prompt.contents.push({ role: last.role, parts: last.parts.splice(results + 1) });
   const native = nativeRequestBody({ ...prepared.payload, messages: [] });
   native.contents = prompt.contents;
   if (useSystemPrompt && prompt.system_instruction?.parts?.length) native.systemInstruction = prompt.system_instruction;
@@ -57,18 +65,38 @@ export function prepareSillyTavernRequest(request, adapters) {
   }
   if (body.stop != null && (!Array.isArray(body.stop) || body.stop.some(value => typeof value !== "string"))) throw requestError("invalid_stop");
   if (body.stop?.length) config.stopSequences = [...body.stop];
-  if (/^gemini-(2\.5|3[.\d]*)-(flash|pro)/.test(body.model)) {
+  if (isGemini4Argon(body.model)) {
+    config.thinkingConfig = { thinkingLevel: gemini4ThinkingLevel(body.reasoning_effort) ?? "MEDIUM", includeThoughts: Boolean(body.include_reasoning) };
+  } else if (/^gemini-(2\.5|3[.\d]*)-(flash|pro)/.test(body.model)) {
     const budget = adapters.calculateGoogleBudgetTokens(body.max_tokens, String(body.reasoning_effort), body.model);
     config.thinkingConfig = { includeThoughts: Boolean(body.include_reasoning) && budget !== 0 };
     if (Number.isInteger(budget)) config.thinkingConfig.thinkingBudget = budget;
     else if (typeof budget === "string" && budget) config.thinkingConfig.thinkingLevel = budget;
   }
   const upstreamStream = mode === "streaming" && body.stream === true && !(body.vertex_image_input && body.vertex_image_input !== "off");
-  if (upstreamStream) native.toolConfig.functionCallingConfig.streamFunctionCallArguments = true;
-  return { body: native, toolName: prepared.toolName, model: body.model, stream: body.stream === true, upstreamStream, mode, continuation };
+  validateGemini4Output(body, body.model, upstreamStream);
+  // Streamed arguments are read only for the transport call alone; client tools arrive whole.
+  if (upstreamStream && !clientTools) native.toolConfig.functionCallingConfig.streamFunctionCallArguments = true;
+  return { body: native, toolName: prepared.toolName, model: body.model, stream: body.stream === true, upstreamStream, mode, continuation, clientTools };
 }
 
-const finishReasons = { stop: "STOP", length: "MAX_TOKENS", content_filter: "SAFETY" };
+const finishReasons = { stop: "STOP", length: "MAX_TOKENS", content_filter: "SAFETY", tool_calls: "STOP" };
+// ST's Google reader takes each functionCall part as one whole call and keeps the
+// thought signature beside it; Gemini 4 also needs its native call ID back.
+function functionCallPart(call, model) {
+  let args;
+  try { args = JSON.parse(call.function?.arguments); } catch {}
+  if (!isObject(args) || typeof call.function?.name !== "string") throw protocolError("invalid_restored_tool");
+  const part = { functionCall: { name: call.function.name, args } };
+  if (isGemini4Argon(model)) {
+    const { id, signature } = gemini4ToolMetadata(call.id);
+    part.functionCall.id = id;
+    if (signature) part.thoughtSignature = signature;
+  } else if (typeof call.id === "string" && call.id.startsWith(SIGNATURE_ID_PREFIX)) {
+    part.thoughtSignature = call.id.slice(SIGNATURE_ID_PREFIX.length);
+  }
+  return part;
+}
 function nativeUsage(usage) {
   return usage ? {
     promptTokenCount: usage.prompt_tokens, candidatesTokenCount: usage.completion_tokens,
@@ -79,7 +107,7 @@ function nativeUsage(usage) {
 
 // Vertex's ST streaming reader expects native candidates[].content.parts, while
 // its non-streaming reader expects choices[] plus responseContent. Match both.
-export function toSillyTavernStream(response, getNativeUsage = () => undefined) {
+export function toSillyTavernStream(response, getNativeUsage = () => undefined, model) {
   return transformSse(response, ({ data }, emit) => {
     if (!data) return;
     if (data.trim() === "[DONE]") return emit(sseData("[DONE]"));
@@ -88,7 +116,9 @@ export function toSillyTavernStream(response, getNativeUsage = () => undefined) 
     const output = { candidates: [] };
     for (const choice of parsed.choices ?? []) {
       const delta = choice.delta ?? {};
-      if (delta.tool_calls?.length) throw protocolError("unexpected_restored_tool");
+      // ST's stream reader ignores the text of an event that carries a function call.
+      if (delta.tool_calls?.length) emit(sseData({ candidates: [{ index: choice.index ?? 0,
+        content: { role: "model", parts: delta.tool_calls.map(call => functionCallPart(call, model)) } }] }));
       const parts = [];
       if (delta.reasoning_content) parts.push({ thought: true, text: delta.reasoning_content });
       if (delta.content) parts.push({ text: delta.content });
@@ -100,6 +130,19 @@ export function toSillyTavernStream(response, getNativeUsage = () => undefined) 
     if (parsed.router_anti_truncation) output.vertexAntiTruncation = parsed.router_anti_truncation;
     emit(sseData(output));
   });
+}
+
+// A checked, complete reply in the shape ST asked for. Also used in a WebView,
+// where older WebKit has no Response.json.
+export function completedSillyTavernResponse(completion, prepared, usageMetadata) {
+  const message = completion.choices[0].message;
+  if (prepared.stream) return toSillyTavernStream(guardCompletionStream(completionStream(completion, true), () => {}, null, BODY_LIMIT), () => usageMetadata, prepared.model);
+  const parts = [];
+  if (message.reasoning_content) parts.push({ thought: true, text: message.reasoning_content });
+  if (message.content) parts.push({ text: message.content });
+  for (const call of message.tool_calls ?? []) parts.push(functionCallPart(call, prepared.model));
+  return new Response(JSON.stringify({ ...completion, responseContent: { role: "model", parts }, usageMetadata,
+    vertexAntiTruncation: completion.router_anti_truncation }), { headers: { "content-type": "application/json" } });
 }
 
 async function readJson(response) {
@@ -122,9 +165,10 @@ export async function restoreSillyTavernResponse(upstream, prepared) {
   if (prepared.upstreamStream) {
     if (!upstream.body) throw protocolError("empty_upstream_stream");
     let usageMetadata;
-    const translated = wrapNativeTextStream(upstream, prepared.toolName, prepared.model, usage => { usageMetadata = usage; });
+    const translated = prepared.clientTools ? wrapNativeStream(upstream, prepared.model)
+      : wrapNativeTextStream(upstream, prepared.toolName, prepared.model, usage => { usageMetadata = usage; });
     const restored = wrapAntiTruncationStream(translated, prepared.toolName);
-    return toSillyTavernStream(guardCompletionStream(restored, () => {}, null, BODY_LIMIT), () => usageMetadata);
+    return toSillyTavernStream(guardCompletionStream(restored, () => {}, null, BODY_LIMIT), () => usageMetadata, prepared.model);
   }
   const raw = await readJson(upstream);
   if (raw.candidates?.length > 1) throw protocolError("unexpected_candidates");
@@ -134,12 +178,5 @@ export async function restoreSillyTavernResponse(upstream, prepared) {
   const completion = prepared.toolName ? restoreAntiTruncationCompletion(translated, prepared.toolName) : translated;
   const restored = inspectCompletion(completion);
   if (!restored.valid) throw protocolError(restored.reason);
-  const message = completion.choices[0].message;
-  if (message.tool_calls?.length) throw protocolError("unexpected_restored_tool");
-  if (prepared.stream) return toSillyTavernStream(guardCompletionStream(completionStream(completion, true), () => {}, null, BODY_LIMIT), () => raw.usageMetadata);
-  const parts = [];
-  if (message.reasoning_content) parts.push({ thought: true, text: message.reasoning_content });
-  if (message.content) parts.push({ text: message.content });
-  return Response.json({ ...completion, responseContent: { role: "model", parts }, usageMetadata: raw.usageMetadata,
-    vertexAntiTruncation: completion.router_anti_truncation });
+  return completedSillyTavernResponse(completion, prepared, raw.usageMetadata);
 }

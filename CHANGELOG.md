@@ -2,6 +2,63 @@
 
 [中文](CHANGELOG.zh-CN.md) | English
 
+## Standalone gateway 0.9.1 and SillyTavern integration 0.5.1 — tool results on native routes
+
+Tags `gateway-v0.9.1` (Docker image `0.9.1`) and `sillytavern-v0.5.1` (one-step package) on the same commit. Replaces 0.9.0/0.5.0 for anyone using tools.
+
+- Fix: after a tool ran, the next request failed with HTTP 400 on native routes (the SillyTavern plugin, Express and Flex). The anti-truncation instruction shared a turn with the function responses, which Gemini 3.7 rejects ("Requests ending with a model turn are not supported"). User text after function responses now starts its own turn, both in the gateway's native translation and after Tavern's prompt conversion in the plugin. The compatible endpoint (Standard and full-mode Priority) was not affected.
+- Found by live testing of 0.9.0/0.5.0: the plugin returned the real call with its signature, and the tool-result request then failed. With the fix, live Gemini 3.7 Flash requests through the plugin (Standard) and through the gateway's Flex route completed the call and the tool-result round trip in non-streaming and streaming modes, with restored text and a normal stop; so did Gemini 4 Argon through the plugin. 217 local tests and 115 release-file checks passed.
+
+## Standalone gateway 0.9.0 and SillyTavern integration 0.5.0 — client tools under anti-truncation
+
+Tags `gateway-v0.9.0` (Docker image `0.9.0`) and `sillytavern-v0.5.0` (one-step package) on the same commit. Update both Tavern halves together; an older server plugin keeps tool requests on Tavern's route.
+
+- **Gateway.** Requests with client tools (`tool_choice` omitted or `auto`) or tool history are now wrapped instead of skipped. The randomly named synthetic tool is appended after the client tools, `tool_choice` becomes `required`, the client's `parallel_tool_calls` is kept, and the closing instruction asks for all visible text in the synthetic tool and other tools whenever the task needs them. Real tool calls reach the client next to the restored text with the `tool_calls` finish reason; streamed real calls are renumbered from index 0. `tool_choice: "none"` keeps the client tools declared but forces the synthetic tool. A forced `tool_choice` (`required` or a named function), legacy `functions`/`function_call`/`role: function`, structured output and multiple candidates still skip the wrapper. The native argument stream carries only the synthetic tool, so streaming requests with client tools or tool history use the buffered fallback (`tool-transport-buffered-fields`); on Express and Flex that is a native stream of whole function calls.
+- **SillyTavern server plugin.** Tavern's registered function tools and its tool history now go through anti-truncation as well. Tool history uses Tavern's own prompt conversion; tool definitions become native declarations ahead of the synthetic tool. Real calls return to Tavern as Gemini `functionCall` parts with their thought signature (and the native call ID on Gemini 4 Argon), in an event of their own because Tavern's stream reader ignores text in an event that carries a call. In streaming mode such requests do not stream function arguments, so the text arrives when the model has finished it; thoughts still stream. Tools whose schema cannot become a native declaration (for example with `default` or `pattern`), non-function tools, a forced tool choice and legacy functions keep Tavern's route.
+- **Extension.** The server's status now reports `features: ["client-tools"]`. Without it, tool requests keep Tavern's route and the panel says the server plugin is too old; other requests are unaffected. The packaged extension now also contains `src/vertex-schema.mjs` and `src/wire.mjs` for the schema check. In TauriTavern, tool requests keep its plain route because its handling of tool history has not been checked.
+- Console log labels now say that `existing-tools` and `tool-history` mean legacy functions.
+- Validation: 215 local tests and 115 release-file checks passed; the local Docker image passed the isolated Compose smoke test; Tavern 1.19.0's own prompt converter turned signed and unsigned tool history (Gemini 3.7 Flash and Gemini 4 Argon) into the expected native request offline. No live Vertex request was made for this release.
+
+## Standalone gateway 0.8.0 — Docker deployment
+
+- Publish Node 24 Linux images on GHCR for amd64 and arm64, with `latest`, `0.8.0` and commit tags. The default Compose file pulls the image; `compose.build.yaml` enables a source build. Includes a persistent settings volume, non-root execution, a read-only root filesystem and a local liveness check.
+- Native installs keep their loopback default. Container listening and explicit console/API public URLs support mapped ports and HTTPS reverse proxies while retaining Host/Origin, session and CSRF checks.
+- Add bilingual deployment instructions and an isolated Compose smoke test for setup, authentication, persistence across recreation, service networking, CJK rendering and shutdown. No real inference is part of this test.
+
+## Unreleased — update experience
+
+Available from `main` (2026-10-14); the version stays 0.4.0.
+
+- The extension no longer requires the server plugin to report exactly its own version, only 0.3.1 or later. SillyTavern auto-updates a Git-installed server plugin on every start but never the extension, so after each release those users used to hit a version mismatch that blocked Continue and image input.
+- The panel now tells a missing server plugin from an outdated one and gives the update steps for each install method; when the versions differ but are compatible, a manual check suggests updating the older half.
+- The Tavern guide's update section now explains, per install method, how to update and what Tavern updates on its own.
+
+## SillyTavern integration 0.4.0
+
+The standalone gateway stays at 0.7.0. Tag `sillytavern-v0.4.0`. Both halves now read 0.4.0; when upgrading from 0.3.x, update both together, since the panel reports a version mismatch while only one half is updated.
+
+- Releases the two sections below: the TauriTavern adaptation and the Tavern plugin part of the Gemini 4 Argon adaptation.
+- The one-step package matches the release commit on `main`. It also works for SillyTavern in Termux; TauriTavern does not use the package.
+- See [validation](docs/VALIDATION.en.md).
+
+## TauriTavern adaptation
+
+Released in SillyTavern integration 0.4.0. See the [TauriTavern section (Chinese)](docs/SILLYTAVERN.md#tauritavern).
+
+- The UI extension now works on its own in [TauriTavern](https://github.com/Darkatse/TauriTavern), which cannot run the server plugin. There the extension shapes the request and restores the reply itself: the transport instruction is appended to Tavern's own Vertex request and the native `tools`/`toolConfig` travel in its Additional Parameters. TauriTavern keeps the credentials, prompt conversion, sampling and thinking settings.
+- Both transport modes read Google's raw streaming events as TauriTavern forwards them, so native finish codes are kept; buffered mode does not stream arguments and delivers one checked, complete reply. Unicode input and the Continue adaptation work; image input does not. YAML Additional Parameters for Vertex cannot be merged, so that request uses plain Vertex and the panel says why.
+- `anti-truncation`, `vertex-text-stream`, `vertex-protocol` and `gemini4` no longer import `node:crypto` at module top level, so a WebView can load them. Gateway and SillyTavern server-plugin behaviour is unchanged.
+- Add an [install guide for AI agents (Chinese)](docs/AGENT-INSTALL.md) and a "Which one to install" section at the top of both READMEs: how to tell SillyTavern from TauriTavern, a command-line-only install, what to ask the user and how to check the result. The Tavern guide gains command-line equivalents for its UI steps and notes that the Release ZIP predates `main` and that the packaged UI folder cannot be used in TauriTavern. A new section covers phones: SillyTavern in Termux and the TauriTavern app.
+- 202 local tests passed. The extension completed six requests against a simulated Tavern route in a Chromium engine and loaded in a local TauriTavern 2.1.1 and 2.3.0. Six live Vertex requests (Gemini 3.7 Flash) covered streaming, buffered, Continue and output-limit cases; their bodies were built by a script following TauriTavern's source, so a request sent by its own backend remains unverified. See [validation](docs/VALIDATION.en.md).
+
+## Gemini 4 Argon
+
+The Tavern plugin part is released in SillyTavern integration 0.4.0; the gateway part is a `main` source update from 2026-10-14 and the gateway version stays 0.7.0. Use the [source update instructions](docs/GEMINI4.en.md#updating).
+
+- Adapt `gemini-4-argon` across normal, buffered and native-streaming profiles, and the SillyTavern Vertex plugin. Use thinking levels instead of numeric budgets, filter documented unsupported parameters and extend the optional text-prefill conversion.
+- Preserve native function-call IDs together with thought signatures. Reject explicit caching, numeric thinking budgets and limits requiring unimplemented continuation-token long decode before inference.
+- 191 local tests and three bounded live gateway requests passed; native streaming delivered seven content-bearing reads. Express is covered by mocks. See [validation](docs/VALIDATION.en.md) for exact boundaries.
+
 ## SillyTavern integration 0.3.1
 
 The standalone gateway stays at 0.7.0. Tag `sillytavern-v0.3.1`.

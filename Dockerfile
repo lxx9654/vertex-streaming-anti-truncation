@@ -1,40 +1,41 @@
 # Vertex Streaming Anti-Truncation —— 容器化部署（Zeabur / Docker 均可用）
-# 上游项目默认只监听 127.0.0.1，这里通过 HOST / GUI_HOST 放开到容器外。
-FROM node:22-slim
+#
+# 基于上游 0.8.0+ 官方 Dockerfile，保留三处 Zeabur 适配：
+#   1) ENTRYPOINT 走 docker-entrypoint.sh（解码 VERTEX_SERVICE_ACCOUNT_B64 → 持久卷）
+#   2) 上游 .dockerignore 用白名单，需显式 COPY scripts/（健康检查等脚本）
+#   3) GATEWAY_STATE_DIR 指向持久卷子目录，与 keys/ 分开
+FROM node:24-bookworm-slim
+
+LABEL org.opencontainers.image.source="https://github.com/lxx9654/vertex-streaming-anti-truncation" \
+      org.opencontainers.image.title="Vertex Streaming Anti-Truncation (Zeabur fork)" \
+      org.opencontainers.image.description="Vertex Gemini gateway with a web console and streaming text restoration" \
+      org.opencontainers.image.licenses="MIT"
 
 ENV NODE_ENV=production \
-    HOST=0.0.0.0 \
-    GUI_HOST=0.0.0.0 \
-    PORT=4781 \
-    GATEWAY_PORT=4781 \
+    LISTEN_HOST=0.0.0.0 \
     GUI_PORT=4780 \
+    PORT=4781 \
     GATEWAY_STATE_DIR=/data/state \
     UPSTREAM_TIMEOUT_MS=600000
-
 WORKDIR /app
 
-# 无第三方运行时依赖，装依赖只是走一遍 npm ci 的完整性检查
 COPY package.json package-lock.json ./
-RUN npm ci --ignore-scripts
-
+RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 COPY bin/ ./bin/
 COPY src/ ./src/
 COPY public/ ./public/
 COPY scripts/ ./scripts/
-# 0.6.0 起 image-input 需要 assets/fonts 下的 Noto CJK 字体
 COPY assets/ ./assets/
+COPY LICENSE NOTICE.md NOTICE.zh-CN.md ./
+COPY LICENSES/ ./LICENSES/
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 
-# 持久化目录：settings.json（GUI 保存的模型/凭据）放这里
 RUN chmod +x /app/docker-entrypoint.sh \
  && mkdir -p /data/state && chown -R node:node /data /app
 USER node
-
-EXPOSE 4781 4780
-
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||4781)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+EXPOSE 4780 4781
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["node", "bin/healthcheck.mjs"]
 
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
 # 带 GUI 启动：控制台会读取已保存配置并自动拉起网关；首次用它配置模型
-CMD ["npm", "start"]
+CMD ["node", "bin/gui.mjs"]
